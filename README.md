@@ -4,11 +4,13 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 6 (Interview Planner) — a confirmed profile can be turned into a
-validated interview plan (role, mode, difficulty, duration → competencies, topics, question
-templates, expected concepts), grounded only in candidate-approved facts, which moves the session
-to `READY`. Builds on the interview state machine (Phase 5), the provider-independent model gateway
-(Phase 4) and resume processing with candidate review. Asking questions (Phase 7) is not built yet.
+**Current status:** Phase 7 (Interviewer) — a planned interview can be run question by
+question: code decides every topic, follow-up, rephrase and the finish; a model may only word a
+follow-up or rephrase, with the session's AI consent. Answers are stored, **not evaluated**
+(Phase 8), and finished interviews wait in `REPORT_GENERATION` for the report (Phase 9). Builds on
+the interview planner (Phase 6), the interview state machine (Phase 5), the provider-independent
+model gateway (Phase 4) and resume processing with candidate review. Backend only: the interview UI
+is a later phase.
 
 > AI is **optional and off by default**. Uploads always use the rule-based extractor; AI
 > extraction runs only when a candidate clicks "Find more with AI" on a configured server, and
@@ -334,7 +336,9 @@ External model                Groq · Gemini · NVIDIA
 
 ```python
 class ModelGateway:
-    async def generate_structured(self, request: ModelRequest, schema: type[T]) -> ModelResult[T]
+    async def generate_structured(self, request: ModelRequest, schema: type[T], *,
+                                  deadline: float | None = None) -> ModelResult[T]
+    # deadline: absolute time.monotonic(); no attempt, backoff or fallback runs past it
     # raises ModelUnavailableError(record) when every provider failed
     # raises ModelNotConfiguredError when no provider serves the capability
 
@@ -345,8 +349,8 @@ CallRecord(request_id, capability, requested_provider, provider, model, attempts
            input_tokens, output_tokens, total_tokens)      # no prompt or output content
 ```
 
-Capabilities: `PROFILE_EXTRACTION` (ProfileAgent) and `INTERVIEW_PLANNING` (PlannerAgent), both
-routed to the configured provider order. Later phases add their own when they need them. The gateway returns validated data and never touches the database or application state.
+Capabilities: `PROFILE_EXTRACTION` (ProfileAgent), `INTERVIEW_PLANNING` (PlannerAgent) and
+`QUESTION_GENERATION` (InterviewerAgent), all routed to the configured provider order. Later phases add their own when they need them. The gateway returns validated data and never touches the database or application state.
 
 ### Providers
 
@@ -481,7 +485,7 @@ bodies are not logged (only the HTTP status).
 
 > **LLM proposes. Orchestrator decides. Validator verifies. Database stores.** (PRD §57)
 > Only `app/services/interview_state_machine.py` changes a session's status, through one
-> transition table. No AI is called in this phase.
+> transition table. The state machine itself never calls a model.
 
 ### Lifecycle (PRD §13, §59, §61)
 
@@ -513,8 +517,17 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
   index. Restart = delete the session and create a new one. Deleting a candidate deletes their
   sessions (`ON DELETE CASCADE`).
 - `PLAN_READY` must carry the validated plan (see [Interview Planner](#interview-planner)), and
-  the database enforces it. Through the API a session now reaches `READY`; later states need the
-  Phase 7+ system events.
+  the database enforces it.
+- `TIME_EXPIRED` (Phase 7, system event): `ASKING` or `WAITING_FOR_ANSWER` → `REPORT_GENERATION`
+  when the time limit is reached. From `NEXT_DECISION` the interviewer uses `FINISH`. `PAUSED` has
+  no such edge: a paused interview's clock is stopped. `END_INTERVIEW` is unchanged.
+- **Finish reason** (`finish_reason`, set only by the state machine): `END_INTERVIEW` →
+  `CANDIDATE_ENDED`, `TIME_EXPIRED` → `TIME_LIMIT`, and `FINISH` must carry `PLAN_COMPLETED` or
+  `TIME_LIMIT` (anything else raises). Sessions finished before Phase 7 keep `NULL`.
+- **Active-time clock** (database time): `START_INTERVIEW` and `RESUME` start it; `PAUSE` and every
+  move into `REPORT_GENERATION` add the running time to `active_seconds` and stop it.
+- Through the API a session now runs from `READY` to `REPORT_GENERATION` (see
+  [Interviewer](#interviewer)); `COMPLETED` needs Phase 9's `REPORT_READY`.
 
 ### API
 
@@ -523,7 +536,7 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
 | `POST /api/interview-sessions` `{"candidate_id"}` | `201`, status `PROFILE_REVIEW` | `404` candidate · `409` unfinished session exists (detail names the candidate's own session id) · `422` |
 | `GET /api/interview-sessions/{id}` | `200` | `404` · `422` |
 | `GET /api/candidates/{id}/interview-sessions` | `200`, newest first | `404` |
-| `POST /api/interview-sessions/{id}/actions` `{"action"}` | `200` | `404` · `409` not allowed now / facts pending · `422` unknown or system event |
+| `POST /api/interview-sessions/{id}/actions` `{"action"}` | `200` | `404` · `409` not allowed now / facts pending · `422` unknown or system event. The time limit is applied first: an expired interview is closed (`TIME_LIMIT`) and the action then gets `409` naming `REPORT_GENERATION` |
 | `DELETE /api/interview-sessions/{id}` | `204` (any state) | `404` |
 
 A session is `{id, candidate_id, status, created_at, updated_at}`; its plan is read with
@@ -558,12 +571,14 @@ these are not registered when `ENVIRONMENT=production`.
 POST /api/interview-sessions/{id}/plan   (session must be INTERVIEW_PLANNING: profile confirmed)
   1. read (short transaction): state check · load APPROVED facts · mode preconditions → commit
   2. no DB connection or lock held:
-       use_ai and AI configured → PlannerAgent → gateway (timeout/retry/fallback, schema)
+       AI consent and AI configured → PlannerAgent → gateway (timeout/retry/fallback, schema)
                                  → validate → if rejected: ONE re-request naming the rule codes
        otherwise, or if that fails → deterministic plan (labelled RULES, with the reason)
        both kinds pass the same validator
-  3. one write transaction: record model calls · lock session · re-check state · re-check that
-     every cited fact is still APPROVED and unchanged · PLAN_READY + plan together · commit
+  3. one write transaction: record model calls · lock session · re-check state · re-check
+     consent (withdrawn during the call → the AI plan is discarded and the RULES plan is stored,
+     rules_reason CONSENT_WITHDRAWN) · re-check that every cited fact is still APPROVED and
+     unchanged · PLAN_READY + plan together · commit
 ```
 
 ### Settings (request body)
@@ -575,10 +590,11 @@ POST /api/interview-sessions/{id}/plan   (session must be INTERVIEW_PLANNING: pr
 | `mode` | `TECHNICAL`, `BEHAVIORAL`, `PROJECT_DEEP_DIVE`, `MIXED` | PRD §42 |
 | `difficulty` | `EASY`, `MEDIUM`, `HARD` | Applied to every topic by code; adapting it is Phase 7 |
 | `duration_minutes` | `15`, `30`, `45` | Topic budget = `duration // 3` (15 → 5, as in the PRD §58 example) |
-| `use_ai` | `false` (default) / `true` | Explicit consent to send approved facts to an AI provider (PRD §48) |
 
 Unknown fields (`status`, `plan`, `job_description`, ...) are rejected with `422`. Job
-descriptions are not part of Phase 6.
+descriptions are not part of Phase 6. Since Phase 7 the former `use_ai` flag is gone (sending it
+is `422`): whether a model may be asked is the session's AI consent
+(`PUT /api/interview-sessions/{id}/ai-consent`, see [Interviewer](#interviewer)).
 
 ### What a plan contains
 
@@ -600,7 +616,8 @@ expected_concepts, facts`.
   code; the model's are discarded, so a guess ("their project uses ONNX") can't become an
   expectation. Technical and HR topics keep the model's domain concepts.
 - **RULES plans** use the catalog, the approved projects and generic templates (project questions
-  from PRD §8/§58). `rules_reason`: `NOT_REQUESTED`, `NOT_CONFIGURED`, `PROVIDERS_FAILED` or
+  from PRD §8/§58). `rules_reason`: `NOT_REQUESTED` (no AI consent), `CONSENT_WITHDRAWN`,
+  `NOT_CONFIGURED`, `PROVIDERS_FAILED` or
   `OUTPUT_REJECTED`. A fallback is never silent.
 
 ### Validation (deterministic, `build_plan`)
@@ -662,6 +679,144 @@ narrow responsibilities (nodes), deterministic catalog functions (tools, PRD §2
 (observability). Not met as written: no framework was formally compared, and models never call
 tools themselves. The application gathers the data and hands it over, which is the least-privilege
 choice PRD §27 asks for.
+
+## Interviewer
+
+> **Code decides, the model may only word.** `app/services/interviewer.py` chooses every action
+> (topic, follow-up, rephrase, finish), the topic, the finish reason and when the interview ends.
+> `app/ai/interviewer_agent.py` may propose the wording of a follow-up or rephrase that code
+> already chose, and only with the session's AI consent; its output is validated before use.
+> The full specification is [docs/phase-7-interviewer-plan.md](docs/phase-7-interviewer-plan.md).
+
+### Flow
+
+```text
+POST .../questions/next
+  T1 (row lock): apply the time limit · open question? return it (no model call) · decide:
+     first/next TOPIC · FOLLOW_UP · REPHRASE · FINISH  (inputs: plan, history, clock, approved
+     facts; never model output or a judgement of answer quality)
+     TOPIC, FINISH, and anything without consent or AI: written in this same transaction
+  model call (follow-up/rephrase wording only): no DB connection or lock held, ≤ 2 proposals,
+     ≤ 30 s and never into the last 60 s
+  T2 (row lock): record the calls · time limit and 60 s reserve · same turn? · consent still
+     granted? · cited facts unchanged? · then write the question (QUESTION_ASKED)
+POST .../answers   (explicit length check before the lock) → row lock · replay? · time limit ·
+     store as NOT_EVALUATED · ANSWER_SUBMITTED → ANSWER_PROCESSED → ANSWER_EVALUATED, one transaction
+```
+
+### Decisions (in order, first match wins)
+
+1. Time limit reached, or a question would start with **less than 60 s** left → finish
+   `TIME_LIMIT` (exactly 60.0 s left still starts one).
+2. No question yet → the first valid topic.
+3. Last answer `CLARIFY` and fewer than 2 rephrases in this chain → `REPHRASE`.
+4. `CLARIFY` beyond the limit, `SKIP`, `DONT_KNOW` → next topic.
+5. Last answer `ANSWER`, fewer than 2 follow-ups, topic time not used up → `FOLLOW_UP`.
+6. Otherwise → next topic. No valid topic left → finish `PLAN_COMPLETED`.
+
+- **Time:** `limit = duration × 60`; elapsed = active time (wall time minus explicit pauses, in
+  database time; closing the tab does not pause). Each topic gets `limit / topics` seconds, exact
+  and never redistributed; follow-ups stop when the topic's share is used.
+- **Topics** are asked in plan order, using the plan's template verbatim (the next template if it
+  duplicates an asked question; the topic is skipped if all do). A topic whose cited facts were
+  withdrawn or edited is skipped.
+- **Duplicates (PRD §33):** normalized equality or `difflib` ratio ≥ 0.85 against every question
+  asked in the session; the term template is judged by its term instead (below).
+
+### Wording
+
+- **Follow-up template:** `"You mentioned {term}. Can you tell me more about that?"`. The term must
+  occur in the answer **and** be an approved cited fact or a planned concept of the topic (matched
+  after NFKC, casefold and punctuation-to-space, `#` kept; shown exactly as typed). Safe terms
+  only (≤ 60 characters, ≤ 6 words, no markup, URLs or PRD §19 attributes), and each term at most
+  once per interview. No term → `"Could you elaborate on your answer?"`, at most once per
+  interview; after that the interview moves to the next topic.
+- **Rephrase:** always of the chain's original question, never another planned question:
+  `"Let me put that another way. This question is about {topic}: {original question}"`, or model
+  wording. A rephrase that duplicates any asked question or another plan question is dropped and
+  the interview moves to the next topic, with no re-request.
+- **Model wording** (`{question, anchor}` / `{question}` only) passes deterministic rules: the
+  anchor is in the answer **and** plan vocabulary, safe, named in the question, not used before;
+  no presumption resting on anything but approved cited facts and the plan topic (answer text never
+  grounds a claim); no evaluative, hiring or §19 language; no URLs or markup; no uncited project;
+  no duplicate. A rejection gets one re-request naming the rule codes, then the deterministic
+  chain: term template → generic follow-up (if unused) → next topic → finish.
+- **Prompt boundary:** the instructions hold closed-set values only. The topic (title, templates,
+  concepts, cited facts) plus the last answer (follow-ups only) or the original question
+  (rephrases only) go in the user message as JSON in a random tag. Clarification text, other
+  answers, ids, names and emails are never sent.
+- `source` is `AI` for model wording and `RULES` for deterministic wording, with `rules_reason`
+  (`NOT_REQUESTED`, `NOT_CONFIGURED`, `PROVIDERS_FAILED`, `OUTPUT_REJECTED`,
+  `CONSENT_WITHDRAWN`). A topic question carries its plan's source and reason, since its text is
+  the plan's.
+
+### AI consent
+
+`interview_sessions.ai_consent`, off by default, governs the planner **and** the interviewer.
+It is checked before a model call and again under the lock before model output is saved. A
+withdrawal during a call discards the output (`CONSENT_WITHDRAWN`); data already sent cannot be
+recalled from the provider. Every change is recorded in `interview_consent_events` (time and new
+value only). The ProfileAgent's resume button has its own disclosure and is outside session
+consent.
+
+### Answers, finish and retention
+
+- **`evaluation_status = NOT_EVALUATED`**: the answer is stored and has **not** been evaluated.
+  No score, rubric result, evidence or missing-concept analysis exists yet (Phase 8).
+- **Finish reasons:** `PLAN_COMPLETED`, `TIME_LIMIT`, `CANDIDATE_ENDED`. The session stays in
+  `REPORT_GENERATION` until Phase 9; nothing reports a report as ready.
+- **Late answers:** once the limit is reached the answer is refused with
+  `409 {"detail": "The interview time limit was reached, so this answer was not saved."}` and is
+  not stored or logged; earlier answers are kept. A retry of an answer saved before the limit is
+  `200`. Clients must keep the unsent text locally and show it with this message.
+- **Length:** at most 10,000 characters (Unicode code points, after stripping); longer →
+  `422 {"detail": "Answer is too long: the limit is 10,000 characters."}`, nothing written.
+- **Retention:** answers live only in `interview_questions`, until the session or candidate is
+  deleted (cascade, with consent events). Never in logs, `provider_calls` or error messages.
+
+### API
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `PUT /api/interview-sessions/{id}/ai-consent` `{"granted": bool}` | `200 {session_id, granted, changed_at}` (a repeat changes nothing) | `404` · `409` granting after `COMPLETED` · `422` |
+| `GET /api/interview-sessions/{id}/ai-consent` | `200 {session_id, granted, history[{granted, changed_at}]}` | `404` |
+| `POST /api/interview-sessions/{id}/questions/next` `{}` | `200 {session_id, status, finish_reason, ai_consent, question, progress{topics_total, time_remaining_seconds, deadline_reached}, model_calls}`: a new question, the open one again (no model call), or `question: null` with the finish reason | `404` · `409` not started / `"Resume the interview first."` / `"Your approved profile changed. Please try again."` · `422` any body field · `503` |
+| `POST /api/interview-sessions/{id}/answers` `{"question_id", "kind", "text"}` | `200 {session_id, status, question}` (stored → `NEXT_DECISION`, or an identical replay) | `404` · `409` late answer / answered differently / not waiting · `422` (`kind` = `ANSWER` needs text; length) · `503` |
+| `GET /api/interview-sessions/{id}/questions` | `200 {session_id, status, finish_reason, progress, questions[]}` | `404` |
+
+`kind` is `ANSWER`, `CLARIFY` (ask for a rephrase), `DONT_KNOW` or `SKIP`. Questions are plain
+text; the anchor and provider call id are never returned. Reading never changes state (the time
+limit is applied by the next write). Not served when `ENVIRONMENT=production`.
+
+### Concurrency and recovery
+
+Requests on one session serialize on its row lock. Two concurrent `questions/next` may both call a
+model (both calls recorded), but one question persists and both get it. The first write after the
+limit closes the interview once; every later late answer gets the same `409`. A crash before T2
+commits leaves the previous resting state, and the next request continues; the clock lives in the
+database. Per turn: at most 2 proposals within 30 s, never inside the last 60 s; `TOPIC`,
+`FINISH` and retries while waiting make no call.
+
+### Deliberate deviations from the PRD
+
+- **§61 browser close = PAUSED:** closing the tab does not pause; only an explicit PAUSE does.
+- **§60 "do not lose the response":** a late answer is refused (the client keeps the draft).
+- **§48 no permanent storage by default:** answers are kept until the session or candidate is
+  deleted; a retention policy is future work.
+- **§16 follow up on anything mentioned:** a term must also be approved plan vocabulary, so many
+  answers get the generic question (and then none).
+- **§30 retry before fallback:** a duplicate rephrase moves straight to the next topic.
+
+### Known limitations
+
+Wording heuristics are English-only and miss lowercase presumptions; model calls are not
+exactly-once; live AI quality is unverified; there is no auth or rate limit; active time includes
+model latency and server downtime; the deadline changes state only on the next write; each term
+is followed up at most once per interview; without a model a question gets at most one rephrase.
+Two open points are recorded for a decision: (1) if every topic's facts are withdrawn before the
+first question, `questions/next` returns `409` (there is no `ASKING` → finish edge for a completed
+plan); (2) the deterministic plan's technical questions differ only in the area name, so some
+pairs are §33 duplicates and the later topic is skipped (e.g. Database after Data Structures).
 
 ## Environment variables
 
@@ -739,3 +894,4 @@ Adding a model:
 | `a41f0c9e7b25` | Allow `MODEL_UNAVAILABLE` as a provider-call error type |
 | `e5813b741341` | Create `interview_sessions` (one unfinished session per candidate) |
 | `b8d14f2a9c63` | Add `interview_sessions.plan` + `plan_provider_call_id`, CHECKs `plan_matches_status` / `plan_is_object`; allow `INTERVIEW_PLANNING` calls. Downgrade **refuses** while any plan exists (it would delete them) and deletes planning-call metadata |
+| `178659f38d45` | Interviewer: session `ai_consent`, `active_seconds`, `active_since`, `finish_reason` (CHECKed, only on finished sessions); `interview_consent_events`; `interview_questions` (≤ 2 follow-ups, ≤ 2 rephrases, one open question per session, answers ≤ 10,000 characters, `NOT_EVALUATED` only); allow `QUESTION_GENERATION` calls. Downgrade **refuses** while questions or consent changes exist |
