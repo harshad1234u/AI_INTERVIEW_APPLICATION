@@ -171,9 +171,14 @@ class ModelGateway:
         return self.routes.get(capability, [])
 
     async def generate_structured(
-        self, request: ModelRequest, schema: type[T]
+        self, request: ModelRequest, schema: type[T], *, deadline: float | None = None
     ) -> ModelResult[T]:
-        """Worst case duration: providers × (max_retries + 1) × timeout, plus backoff."""
+        """Worst case duration: providers × (max_retries + 1) × timeout, plus backoff.
+
+        `deadline` (an absolute time.monotonic() value) caps the whole call: no attempt or backoff
+        runs past it, and an attempt still running then is cut off as a TIMEOUT. None = no cap
+        beyond the per-attempt timeout.
+        """
         providers = self.providers_for(request.capability)
         if not providers:
             raise ModelNotConfiguredError(request.capability)
@@ -181,13 +186,20 @@ class ModelGateway:
         max_tokens = min(request.max_output_tokens or self.max_output_tokens, self.max_output_tokens)
         record = CallRecord(uuid.uuid4().hex, request.capability, providers[0].name)
         started = time.monotonic()
+        out_of_time = False
 
         for position, provider in enumerate(providers):
             for retry in range(self.max_retries + 1):
+                timeout = self.timeout_seconds
+                if deadline is not None:
+                    timeout = min(timeout, deadline - time.monotonic())
+                if timeout <= 0:
+                    out_of_time = True
+                    break
                 record.attempts += 1
                 attempt_started = time.monotonic()
                 try:
-                    with anyio.fail_after(self.timeout_seconds):
+                    with anyio.fail_after(timeout):
                         raw = await provider.complete(request, json_schema, max_tokens)
                     output = parse_structured(raw, schema)
                 except ProviderError as exc:
@@ -213,7 +225,14 @@ class ModelGateway:
                 # Same request, same token limit: a truncated answer would just be truncated again.
                 if kind not in RETRYABLE or detail == "truncated" or retry == self.max_retries:
                     break
-                await self.sleep(min(self.backoff_base * 2**retry, self.backoff_max))
+                backoff = min(self.backoff_base * 2**retry, self.backoff_max)
+                if deadline is not None and time.monotonic() + backoff >= deadline:
+                    out_of_time = True
+                    break
+                await self.sleep(backoff)
+            if out_of_time:  # the caller's deadline: no further attempt on any provider
+                record.error_type = ErrorKind.TIMEOUT
+                break
 
         record.latency_ms = round((time.monotonic() - started) * 1000)
         logger.error("Model call %s failed on every provider after %d attempts (last: %s)",

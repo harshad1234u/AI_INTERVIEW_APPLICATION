@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 
 import httpx2 as httpx
 import pytest
@@ -161,6 +162,33 @@ async def test_hanging_provider_is_cut_off_by_the_timeout() -> None:
     assert exc.value.record.error_type == ErrorKind.TIMEOUT
     assert len(provider.calls) == 2
     assert exc.value.record.latency_ms < 2000
+
+
+async def test_deadline_caps_the_whole_call_across_retries_and_providers() -> None:
+    slow, spare = FakeProvider("groq", HANG), FakeProvider("gemini", OK)
+    gateway = make_gateway(slow, spare, retries=3, timeout=10)
+    started = time.monotonic()
+    with pytest.raises(ModelUnavailableError) as exc:
+        await gateway.generate_structured(REQUEST, Out, deadline=started + 0.2)
+    assert time.monotonic() - started < 2  # not 4 x 10 s
+    assert (len(slow.calls), spare.calls, exc.value.record.error_type) == (1, [], ErrorKind.TIMEOUT)
+
+
+async def test_deadline_stops_backoff_and_an_expired_deadline_calls_nothing() -> None:
+    flaky, sleep = FakeProvider("groq", ErrorKind.SERVER_ERROR), RecordingSleep()
+    gateway = make_gateway(flaky, retries=3, sleep=sleep)
+    with pytest.raises(ModelUnavailableError) as exc:  # the backoff (0.5 s) would pass it
+        await gateway.generate_structured(REQUEST, Out, deadline=time.monotonic() + 0.3)
+    assert (len(flaky.calls), sleep.delays, exc.value.record.error_type) == (
+        1, [], ErrorKind.TIMEOUT)
+    with pytest.raises(ModelUnavailableError) as exc:
+        await gateway.generate_structured(REQUEST, Out, deadline=time.monotonic() - 1)
+    assert (len(flaky.calls), exc.value.record.attempts) == (1, 0)
+    # A deadline far away changes nothing.
+    ok = FakeProvider("groq", OK)
+    result = await make_gateway(ok).generate_structured(REQUEST, Out,
+                                                        deadline=time.monotonic() + 60)
+    assert result.record.attempts == 1
 
 
 @pytest.mark.parametrize("kind", [ErrorKind.AUTH, ErrorKind.MODEL_UNAVAILABLE,
