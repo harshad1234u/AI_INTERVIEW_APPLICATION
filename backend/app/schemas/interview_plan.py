@@ -13,7 +13,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from app.models.interview_session import InterviewStatus
+# RulesReason (why a RULES plan was used) is shared with interview questions, so it lives with the
+# session model; it is re-exported here.
+from app.models.interview_session import InterviewStatus, RulesReason  # noqa: F401
 from app.models.resume import FACT_MAX_LENGTH, FactCategory
 
 MINUTES_PER_TOPIC = 3  # duration // 3 = topic budget; 15 min -> 5 topics, as in the PRD §58 example
@@ -77,15 +79,6 @@ class TopicBasis(StrEnum):
 class PlanSource(StrEnum):
     AI = "AI"  # model proposal that passed validation
     RULES = "RULES"  # deterministic plan (same validation)
-
-
-class RulesReason(StrEnum):
-    """Why a RULES plan was used. Never silent."""
-
-    NOT_REQUESTED = "NOT_REQUESTED"  # use_ai was false
-    NOT_CONFIGURED = "NOT_CONFIGURED"  # no AI provider on this server
-    PROVIDERS_FAILED = "PROVIDERS_FAILED"  # every provider failed (timeout, auth, rate limit, ...)
-    OUTPUT_REJECTED = "OUTPUT_REJECTED"  # proposals failed validation twice
 
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]

@@ -34,6 +34,9 @@ PRD_EDGES = [
     (S.PAUSED, E.RESUME, S.WAITING_FOR_ANSWER),
     (S.WAITING_FOR_ANSWER, E.END_INTERVIEW, S.REPORT_GENERATION),
     (S.PAUSED, E.END_INTERVIEW, S.REPORT_GENERATION),
+    # Phase 7 (Q1): the time limit, raised by the application only
+    (S.ASKING, E.TIME_EXPIRED, S.REPORT_GENERATION),
+    (S.WAITING_FOR_ANSWER, E.TIME_EXPIRED, S.REPORT_GENERATION),
 ]
 ALLOWED = {(frm, ev) for frm, ev, _ in PRD_EDGES}
 FORBIDDEN = [pair for pair in itertools.product(S, E) if pair not in ALLOWED]
@@ -57,7 +60,7 @@ def test_forbidden_transition(frm: S, event: E) -> None:
 
 
 def test_forbidden_list_is_the_full_complement() -> None:
-    assert len(FORBIDDEN) == len(S) * len(E) - len(PRD_EDGES) == 13 * 17 - 18
+    assert len(FORBIDDEN) == len(S) * len(E) - len(PRD_EDGES) == 13 * 18 - 20
 
 
 def test_completed_is_terminal() -> None:
@@ -102,5 +105,5 @@ def test_client_actions_are_exactly_the_five_and_no_system_event() -> None:
     assert {e.value for e in system} == {
         "PROFILE_PROCESSING_STARTED", "PROFILE_READY", "PLAN_READY", "QUESTION_ASKED",
         "ANSWER_SUBMITTED", "ANSWER_PROCESSED", "ANSWER_EVALUATED", "FOLLOW_UP", "NEXT_TOPIC",
-        "REPHRASE", "FINISH", "REPORT_READY",
+        "REPHRASE", "FINISH", "REPORT_READY", "TIME_EXPIRED",
     }

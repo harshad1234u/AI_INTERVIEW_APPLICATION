@@ -29,6 +29,7 @@ class ModelCapability(StrEnum):
     # Only what an agent actually uses today. Later phases add their own.
     PROFILE_EXTRACTION = "PROFILE_EXTRACTION"
     INTERVIEW_PLANNING = "INTERVIEW_PLANNING"
+    QUESTION_GENERATION = "QUESTION_GENERATION"
 
 
 class ErrorKind(StrEnum):

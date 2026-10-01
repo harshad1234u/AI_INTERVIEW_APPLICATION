@@ -19,7 +19,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.interview_session import ONE_ACTIVE_SESSION_INDEX, InterviewSession, InterviewStatus
+from app.models.interview_session import (
+    ONE_ACTIVE_SESSION_INDEX,
+    FinishReason,
+    InterviewSession,
+    InterviewStatus,
+)
 from app.models.resume import CandidateFact, FactStatus
 
 logger = logging.getLogger(__name__)
@@ -57,6 +62,8 @@ class SessionEvent(StrEnum):
     REPHRASE = "REPHRASE"
     FINISH = "FINISH"
     REPORT_READY = "REPORT_READY"  # Coach (Phase 9)
+    # The time limit (Phase 7): raised by the application when it finds the deadline passed
+    TIME_EXPIRED = "TIME_EXPIRED"
 
 
 E = SessionEvent
@@ -85,7 +92,15 @@ TRANSITIONS: dict[tuple[InterviewStatus, SessionEvent], InterviewStatus] = {
     # PRD §59 "user finishes early": generate a partial report
     (S.WAITING_FOR_ANSWER, E.END_INTERVIEW): S.REPORT_GENERATION,
     (S.PAUSED, E.END_INTERVIEW): S.REPORT_GENERATION,
+    # PRD §12 "interview timeout": the application ends the interview at the time limit. (From
+    # NEXT_DECISION it uses FINISH with TIME_LIMIT; PAUSED stops the clock, so it cannot expire.)
+    (S.ASKING, E.TIME_EXPIRED): S.REPORT_GENERATION,
+    (S.WAITING_FOR_ANSWER, E.TIME_EXPIRED): S.REPORT_GENERATION,
 }
+# FINISH must say why; the other ways into REPORT_GENERATION imply it.
+FINISH_REASONS = (FinishReason.PLAN_COMPLETED, FinishReason.TIME_LIMIT)
+IMPLIED_FINISH_REASON = {E.END_INTERVIEW: FinishReason.CANDIDATE_ENDED,
+                         E.TIME_EXPIRED: FinishReason.TIME_LIMIT}
 
 
 class SessionNotFound(Exception):
@@ -150,15 +165,27 @@ def create_session(db: Session, candidate_id: uuid.UUID) -> InterviewSession:
 
 
 def apply_event(
-    db: Session, session_id: uuid.UUID, event: SessionEvent, *, plan: dict[str, Any] | None = None
+    db: Session,
+    session_id: uuid.UUID,
+    event: SessionEvent,
+    *,
+    plan: dict[str, Any] | None = None,
+    finish_reason: FinishReason | None = None,
 ) -> InterviewSession:
     """Lock the session row, check the event against its latest committed state, apply it.
 
     PLAN_READY must carry the validated plan, written in the same flush as READY (the database
-    rejects one without the other); no other event may carry one.
+    rejects one without the other); no other event may carry one. Likewise FINISH must carry its
+    reason (PLAN_COMPLETED or TIME_LIMIT), and only FINISH takes one.
+
+    Also keeps the active-time clock, in database time: START_INTERVIEW and RESUME start it; PAUSE
+    and every move into REPORT_GENERATION add the running time to active_seconds and stop it.
     """
     if (event == E.PLAN_READY) != (plan is not None):
         raise ValueError("PLAN_READY needs the validated plan, and only PLAN_READY takes one")
+    if (event == E.FINISH) != (finish_reason is not None) or (
+            finish_reason is not None and finish_reason not in FINISH_REASONS):
+        raise ValueError("FINISH needs PLAN_COMPLETED or TIME_LIMIT, and only FINISH takes a reason")
     session = db.scalar(
         select(InterviewSession)
         .where(InterviewSession.id == session_id)
@@ -176,11 +203,22 @@ def apply_event(
     session.status = new
     if plan is not None:
         session.plan = plan
+    if event in (E.START_INTERVIEW, E.RESUME):
+        session.active_since = func.clock_timestamp()
+    if event == E.PAUSE or new == S.REPORT_GENERATION:
+        # One UPDATE: the right-hand side sees the old active_since. NULL (already stopped, e.g.
+        # END_INTERVIEW while PAUSED) adds nothing.
+        session.active_seconds = InterviewSession.active_seconds + func.coalesce(
+            func.extract("epoch", func.clock_timestamp() - InterviewSession.active_since), 0)
+        session.active_since = None
+    if new == S.REPORT_GENERATION:
+        session.finish_reason = finish_reason or IMPLIED_FINISH_REASON[event]
     # clock_timestamp, not now(): now() is the transaction start, which can be earlier than the
     # commit of a transition this one waited for.
     session.updated_at = func.clock_timestamp()
     db.flush()
-    logger.info("Interview session %s: %s -> %s on %s", session.id, old, new, event)
+    logger.info("Interview session %s: %s -> %s on %s%s", session.id, old, new, event,
+                f" ({session.finish_reason})" if new == S.REPORT_GENERATION else "")
     return session
 
 

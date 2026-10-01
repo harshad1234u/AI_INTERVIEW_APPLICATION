@@ -65,7 +65,8 @@ def act(client: TestClient, session_id: str, action: object):
 def drive(db: Session, session_id: str, *events: E) -> None:
     """Apply system events the way later phases' orchestrator will."""
     for event in events:
-        apply_event(db, uuid.UUID(session_id), event, plan=plan_for(event))
+        apply_event(db, uuid.UUID(session_id), event, plan=plan_for(event),
+                    finish_reason="PLAN_COMPLETED" if event == E.FINISH else None)
         db.commit()
 
 
