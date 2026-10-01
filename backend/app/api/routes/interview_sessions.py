@@ -182,8 +182,8 @@ def plan_interview_session(
     try:
         plan = outcome.plan or fallback_plan(inputs.settings, inputs.facts, outcome.rules_reason)
     except PlanRejected as exc:
-        # Only reachable if an approved project name collides with the fallback's own generic
-        # wording; the rules still win over a plan that would mislabel the candidate's facts.
+        # Not expected: every mode, duration and project-name case is covered by tests. Kept so
+        # that a future catalog change fails loudly instead of storing an invalid plan.
         logger.error("Fallback plan for session %s failed validation: %s", session_id, exc)
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR,
                             "Could not build an interview plan") from None

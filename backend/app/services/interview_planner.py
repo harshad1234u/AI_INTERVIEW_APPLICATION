@@ -234,7 +234,11 @@ def build_plan(
         # present a "generic" topic as being about the candidate), nor a §19 attribute.
         own = [_own_words(t, [f.fact for f in cited] + [LABELS[item.competency]])
                for t in (item.topic, *item.question_templates, *item.expected_concepts)]
-        if any(_mentions(text, project) for text in own for project in projects):
+        # Only a model can write such a reference. The fallback's wording is fixed catalog text
+        # whose only candidate text is the project it cites, so a match there is a word that
+        # happens to be a project name ("worked in a team" vs a project called "Team").
+        if source == PlanSource.AI and any(
+                _mentions(text, project) for text in own for project in projects):
             codes.add("uncited_project")
         if any(SENSITIVE.search(text) for text in own):
             codes.add("sensitive_attribute")
@@ -277,7 +281,8 @@ def fallback_plan(
     """Deterministic plan from the catalog and approved projects only. Validated like any other."""
     groups, _ = plan_groups(settings, facts)
     ref_of = {f.fact_id: ref for ref, f in fact_refs(facts).items()}
-    unique_projects = {f.fact.casefold(): f for f in reversed(facts)
+    # Same normalisation as the duplicate-topic rule: "TrustLens" and "TrustLens." are one project.
+    unique_projects = {_key(f.fact): f for f in reversed(facts)
                        if f.category == FactCategory.PROJECT}
     projects = sorted(unique_projects.values(), key=facts.index)
     role = ROLE_LABELS[settings.target_role]

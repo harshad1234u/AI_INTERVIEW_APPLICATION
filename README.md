@@ -608,9 +608,11 @@ expected_concepts, facts`.
 Topic count within budget · every required group covered · competencies allowed for the mode ·
 fact refs exist in the APPROVED set sent (pending and rejected facts are never sent, so they can't
 be cited) · each project topic cites exactly one approved PROJECT and names it · every cited fact is
-mentioned · the planner's own wording names no uncited approved project and no PRD §19 attribute
-(gender, religion, caste, marital status, photograph) · no duplicate topics or questions
-(normalised) · technical topics list expected concepts. The model's output schema has no status,
+mentioned · the planner's own wording names no uncited approved project (checked for AI proposals:
+the fallback's fixed wording only ever names the project it cites, so a project called "Team" no
+longer collides with "worked in a team") and no PRD §19 attribute (gender, religion, caste, marital
+status, photograph) · no duplicate topics or questions (normalised; the fallback also treats
+"TrustLens" and "TrustLens." as one project) · technical topics list expected concepts. The model's output schema has no status,
 approval, score, difficulty or fact fields and rejects unknown fields, so a model cannot approve
 facts, change state or score anyone.
 

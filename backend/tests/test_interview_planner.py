@@ -1,6 +1,7 @@
 """Planner rules: catalog, validation, grounding, safety and the deterministic fallback. Pure: no DB."""
 
 import itertools
+import string
 import uuid
 
 import pytest
@@ -21,9 +22,13 @@ from app.schemas.interview_plan import (
     TopicBasis,
 )
 from app.services.interview_planner import (
+    BEHAVIORAL_TOPICS,
     FOCUS,
     GROUP,
+    HR_TOPIC,
     MODE_GROUPS,
+    PROJECT_QUESTIONS,
+    TECHNICAL_QUESTION,
     PlanRejected,
     ProjectRequired,
     build_plan,
@@ -154,6 +159,62 @@ def test_fallback_mixed_shares_the_budget_across_groups() -> None:
     plan = fallback_plan(settings(M.MIXED, 15), FACTS, RulesReason.NOT_REQUESTED)
     assert [t.question_type for t in plan.topics] == [
         Q.TECHNICAL, Q.TECHNICAL, Q.PROJECT, Q.BEHAVIORAL, Q.HR]
+
+
+# Approved project names that are ordinary words in the fallback's own wording ("worked in a
+# team", "give an example", "Software Developer Intern role"). These used to fail validation and
+# made planning a 500 for that candidate.
+CATALOG_WORDS = ["Team", "Example", "Core", "Concepts", "In", "You", "What", "Role", "Time",
+                 "Learning", "Decisions", "Motivation", "Intern", "Software"]
+
+
+@pytest.mark.parametrize("duration", (15, 30, 45))
+@pytest.mark.parametrize("mode", list(M))
+@pytest.mark.parametrize("name", CATALOG_WORDS)
+def test_fallback_survives_project_names_that_are_catalog_words(name, mode, duration) -> None:
+    project = fact(FC.PROJECT, name)
+    plan = fallback_plan(settings(mode, duration), [project, PYTHON], RulesReason.NOT_REQUESTED)
+    for t in plan.topics:
+        if t.question_type == Q.PROJECT:
+            assert (t.basis, t.facts) == (TopicBasis.CANDIDATE_FACT, [project])
+        else:  # generic wording that merely contains the word is still generic
+            assert (t.basis, t.facts) == (TopicBasis.GENERIC, [])
+
+
+def test_fallback_survives_a_project_named_project() -> None:
+    named = fact(FC.PROJECT, "Project")
+    plan = fallback_plan(settings(M.PROJECT_DEEP_DIVE, 15), [named, TRUSTLENS],
+                         RulesReason.NOT_REQUESTED)
+    assert [(t.topic, t.facts) for t in plan.topics] == [
+        ("Project: Project", [named]), ("Project: TrustLens", [TRUSTLENS])]
+
+
+def test_fallback_treats_names_differing_only_in_case_spacing_or_end_punctuation_as_one() -> None:
+    variants = [fact(FC.PROJECT, n) for n in ("TrustLens.", "trustlens !", " TRUSTLENS")]
+    plan = fallback_plan(settings(M.PROJECT_DEEP_DIVE, 45), [TRUSTLENS, *variants, CAMPUS],
+                         RulesReason.NOT_REQUESTED)
+    assert [t.topic for t in plan.topics] == ["Project: TrustLens", "Project: Campus Connect"]
+
+
+def test_catalog_wording_takes_no_candidate_text_except_the_cited_project() -> None:
+    """Why only AI proposals are checked for uncited projects: fallback text is these constants,
+    filled with a label, the role and the one project the topic cites."""
+    texts = (TECHNICAL_QUESTION, *PROJECT_QUESTIONS, *itertools.chain(*BEHAVIORAL_TOPICS),
+             *HR_TOPIC)
+    fields = {f for text in texts for _, f, _, _ in string.Formatter().parse(text) if f}
+    assert fields == {"area", "project", "role"}
+
+
+def test_ai_proposals_still_may_not_name_an_uncited_project() -> None:
+    team = fact(FC.PROJECT, "Team")
+    topics = [
+        topic(C.DATABASE, "Database indexing", questions=["How does an index speed up a query?"]),
+        topic(C.PROJECT_UNDERSTANDING, "Team architecture", ["F1"],
+              ["Explain the architecture of Team."]),
+        topic(C.BEHAVIORAL, "Teamwork", questions=["Describe a time you worked in a team."]),
+        topic(C.HR, "Motivation", questions=["Why this internship?"], concepts=[]),
+    ]
+    assert "uncited_project" in rejected(topics, facts=[team])
 
 
 # ---------- validation of proposals ----------
