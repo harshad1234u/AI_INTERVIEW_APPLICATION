@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.ai.gateway import ModelGateway
+from app.ai.gateway import CallRecord, ModelGateway
 from app.ai.planner_agent import PlannerOutcome, propose_plan
 from app.ai.providers import get_model_gateway
 from app.api.routes.candidates import get_candidate
@@ -20,7 +20,6 @@ from app.schemas.interview_plan import (
     InterviewPlanResult,
     InterviewPlanView,
     ModelCallSummary,
-    PlanRequest,
     PlanSettings,
     RulesReason,
 )
@@ -29,6 +28,7 @@ from app.schemas.interview_session import (
     InterviewSessionResponse,
     SessionActionRequest,
 )
+from app.schemas.interview_turn import ConsentHistory, ConsentRequest, ConsentState
 from app.services.interview_planner import (
     PlanningNotAllowed,
     PlanRejected,
@@ -38,6 +38,7 @@ from app.services.interview_planner import (
     prepare_planning,
     save_plan,
 )
+from app.services.interviewer import ConsentNotAllowed, consent_history, set_consent
 from app.services.interview_state_machine import (
     ActiveSessionExists,
     InvalidTransition,
@@ -60,6 +61,15 @@ def get_interview_session(session_id: uuid.UUID, db: Session = Depends(get_db)) 
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     return session
+
+
+def _call_summaries(records: list[CallRecord]) -> list[ModelCallSummary]:
+    return [ModelCallSummary(
+        request_id=r.request_id, requested_provider=r.requested_provider, provider=r.provider,
+        model=r.model, fallback_used=r.fallback_used, attempts=r.attempts,
+        error_type=r.error_type, latency_ms=r.latency_ms, input_tokens=r.input_tokens,
+        output_tokens=r.output_tokens, total_tokens=r.total_tokens,
+    ) for r in records]
 
 
 def _commit(db: Session) -> None:
@@ -155,13 +165,13 @@ def delete_interview_session(
 @router.post("/interview-sessions/{session_id}/plan", response_model=InterviewPlanResult)
 def plan_interview_session(
     session_id: uuid.UUID,
-    body: PlanRequest,
+    settings: PlanSettings,
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
 ) -> InterviewPlanResult:
     """INTERVIEW_PLANNING -> READY with a validated plan. Never fails because AI failed: the
-    deterministic plan (labelled RULES, with the reason) is used instead (PRD §30, §31)."""
-    settings = PlanSettings(**body.model_dump(exclude={"use_ai"}))
+    deterministic plan (labelled RULES, with the reason) is used instead (PRD §30, §31).
+    A model is asked only with the session's AI consent (PUT .../ai-consent)."""
     try:
         inputs = prepare_planning(db, session_id, settings)  # ends its read transaction
     except SessionNotFound:
@@ -172,7 +182,7 @@ def plan_interview_session(
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
 
     # No DB connection or lock is held from here until save_plan.
-    if not body.use_ai:
+    if not inputs.ai_consent:
         outcome = PlannerOutcome(None, RulesReason.NOT_REQUESTED)
     elif gateway is None:
         outcome = PlannerOutcome(None, RulesReason.NOT_CONFIGURED)
@@ -189,7 +199,7 @@ def plan_interview_session(
                             "Could not build an interview plan") from None
 
     try:
-        session = save_plan(db, inputs, plan, outcome.records)
+        session, plan = save_plan(db, inputs, plan, outcome.records)
     except SessionNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
     except (PlanningNotAllowed, PlanStale) as exc:
@@ -199,12 +209,7 @@ def plan_interview_session(
         session_id=session.id,
         status=session.status,
         plan=plan,
-        model_calls=[ModelCallSummary(
-            request_id=r.request_id, requested_provider=r.requested_provider, provider=r.provider,
-            model=r.model, fallback_used=r.fallback_used, attempts=r.attempts,
-            error_type=r.error_type, latency_ms=r.latency_ms, input_tokens=r.input_tokens,
-            output_tokens=r.output_tokens, total_tokens=r.total_tokens,
-        ) for r in outcome.records],
+        model_calls=_call_summaries(outcome.records),
     )
 
 
@@ -216,3 +221,34 @@ def read_interview_plan(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "This interview session has no plan yet")
     return InterviewPlanView(session_id=session.id, status=session.status,
                              plan=InterviewPlan.model_validate(session.plan))
+
+
+# ---------- AI consent (Phase 7, D2) ----------
+
+
+@router.put("/interview-sessions/{session_id}/ai-consent", response_model=ConsentState)
+def put_ai_consent(
+    session_id: uuid.UUID, body: ConsentRequest, db: Session = Depends(get_db)
+) -> ConsentState:
+    """Grant or withdraw consent to send this session's data to an AI provider. Governs the
+    planner and the interviewer. Data already sent cannot be recalled by withdrawing."""
+    try:
+        session = set_consent(db, session_id, body.granted)
+    except SessionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
+    except ConsentNotAllowed as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    history = consent_history(db, session.id)
+    _commit(db)
+    return ConsentState(session_id=session.id, granted=session.ai_consent,
+                        changed_at=history[-1].changed_at if history else None)
+
+
+@router.get("/interview-sessions/{session_id}/ai-consent", response_model=ConsentHistory)
+def get_ai_consent(
+    session: InterviewSession = Depends(get_interview_session), db: Session = Depends(get_db)
+) -> ConsentHistory:
+    return ConsentHistory(session_id=session.id, granted=session.ai_consent,
+                          history=consent_history(db, session.id))

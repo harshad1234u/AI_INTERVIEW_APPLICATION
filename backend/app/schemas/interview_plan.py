@@ -1,7 +1,8 @@
 """Interview plan contracts (PRD §8, §14, §42): planning settings, the model's proposal, the stored plan.
 
 Three different shapes on purpose:
-- PlanRequest: what the client chooses. Closed sets only, so no client free text reaches a prompt.
+- PlanSettings: what the client chooses. Closed sets only, so no client free text reaches a prompt.
+  Whether a model may be asked is the session's AI consent (PUT .../ai-consent), not a field here.
 - PlanProposal: the only thing a model may return. No status, approval, score, id, difficulty or
   fact fields: it can cite approved facts by ref, never add or change one.
 - InterviewPlan: what the application stores after validation. Built by code, never by the model.
@@ -96,11 +97,6 @@ class PlanSettings(BaseModel):
     mode: InterviewMode
     difficulty: Difficulty
     duration_minutes: Literal[15, 30, 45]
-
-
-class PlanRequest(PlanSettings):
-    # Explicit consent to send the candidate's approved facts to an external AI provider (PRD §48).
-    use_ai: bool = False
 
 
 # ---------- model proposal (the only shape a model may return) ----------

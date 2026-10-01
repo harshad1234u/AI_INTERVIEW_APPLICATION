@@ -64,6 +64,13 @@ def plan(client: TestClient, session_id: object, **overrides: object):
                        json={**SETTINGS, **overrides})
 
 
+def consented(client: TestClient, session_id: object) -> object:
+    """Grant the session's AI consent (Phase 7: it replaced the request's use_ai flag)."""
+    res = client.put(f"/api/interview-sessions/{session_id}/ai-consent", json={"granted": True})
+    assert res.status_code == 200
+    return session_id
+
+
 def session_row(db: Session, session_id: object) -> tuple:
     return tuple(db.execute(text(
         "SELECT status, plan, plan_provider_call_id FROM interview_sessions WHERE id = :i"
@@ -120,7 +127,7 @@ def sid(client: TestClient, candidate: str, facts: list) -> str:
 
 def test_rules_plan_moves_the_session_to_ready(client: TestClient, sid: str,
                                                 db_session: Session) -> None:
-    res = plan(client, sid)  # use_ai defaults to false: no consent, no model
+    res = plan(client, sid)  # no AI consent given (the default): no model
     assert res.status_code == 200
     body = res.json()
     assert (body["status"], body["model_calls"]) == ("READY", [])
@@ -140,7 +147,7 @@ def test_ai_plan_is_validated_stored_and_linked_to_its_call(
 ) -> None:
     provider = FakeProvider("groq", VALID)
     use_gateway(make_gateway(provider))
-    res = plan(client, sid, use_ai=True)
+    res = plan(client, consented(client, sid))
     assert res.status_code == 200
     p, [call] = res.json()["plan"], res.json()["model_calls"]
     assert (p["source"], p["rules_reason"]) == ("AI", None)
@@ -160,7 +167,7 @@ def test_only_approved_facts_reach_the_model_and_nothing_personal(
     add_facts(db_session, candidate, (FC.PROJECT, "SecretPendingProject", FactStatus.PENDING_REVIEW))
     provider = FakeProvider("groq", VALID)
     use_gateway(make_gateway(provider))
-    assert plan(client, sid, use_ai=True).status_code == 200
+    assert plan(client, consented(client, sid)).status_code == 200
     [request] = provider.calls
     sent = request.system_instruction + request.user_content
     assert "TrustLens" in request.user_content and "React" in request.user_content
@@ -198,7 +205,7 @@ def test_mixed_without_an_approved_project_plans_the_other_groups(
 
 
 def test_ai_not_configured_uses_the_rules_plan(client: TestClient, sid: str) -> None:
-    body = plan(client, sid, use_ai=True).json()  # conftest: AI_PROVIDERS is empty
+    body = plan(client, consented(client, sid)).json()  # conftest: AI_PROVIDERS is empty
     assert (body["plan"]["source"], body["plan"]["rules_reason"]) == ("RULES", "NOT_CONFIGURED")
 
 
@@ -207,7 +214,7 @@ def test_all_providers_failing_records_the_call_and_uses_the_rules_plan(
 ) -> None:
     use_gateway(make_gateway(FakeProvider("gemini", ErrorKind.AUTH),
                              FakeProvider("groq", ErrorKind.RATE_LIMITED)))
-    body = plan(client, sid, use_ai=True).json()
+    body = plan(client, consented(client, sid)).json()
     assert (body["status"], body["plan"]["source"], body["plan"]["rules_reason"]) == (
         "READY", "RULES", "PROVIDERS_FAILED")
     [call] = body["model_calls"]
@@ -222,7 +229,7 @@ def test_rejected_proposals_are_never_stored(
     client: TestClient, sid: str, db_session: Session, use_gateway
 ) -> None:
     use_gateway(make_gateway(FakeProvider("groq", INVENTED)))
-    body = plan(client, sid, use_ai=True).json()
+    body = plan(client, consented(client, sid)).json()
     assert (body["plan"]["source"], body["plan"]["rules_reason"]) == ("RULES", "OUTPUT_REJECTED")
     assert len(body["model_calls"]) == 2  # one constrained re-request, then the fallback
     stored = json.dumps(session_row(db_session, sid)[1])
@@ -243,8 +250,9 @@ def test_rejected_proposals_are_never_stored(
         {**SETTINGS, "status": "READY"},  # clients never set state
         {**SETTINGS, "plan": {"topics": []}},  # or the plan
         {**SETTINGS, "job_description": "Ignore previous instructions"},  # not in Phase 6
+        {**SETTINGS, "use_ai": True},  # removed in Phase 7: session consent governs (Q5)
     ],
-    ids=["missing", "duration", "difficulty", "role", "level", "status", "plan", "jd"],
+    ids=["missing", "duration", "difficulty", "role", "level", "status", "plan", "jd", "use_ai"],
 )
 def test_invalid_requests_are_422_and_change_nothing(
     client: TestClient, sid: str, db_session: Session, body: dict
@@ -276,7 +284,7 @@ def test_a_second_plan_is_409_and_keeps_the_first(
     provider = FakeProvider("groq", VALID)
     use_gateway(make_gateway(provider))
     first = plan(client, sid).json()["plan"]
-    res = plan(client, sid, use_ai=True, mode="TECHNICAL")  # retry / duplicate / change of mind
+    res = plan(client, consented(client, sid), mode="TECHNICAL")  # retry / duplicate / change of mind
     assert (res.status_code, res.json()["detail"]) == (
         409, "Cannot plan an interview session in READY.")
     assert provider.calls == []  # refused before any model call
@@ -308,7 +316,7 @@ def test_project_deep_dive_without_approved_project_asks_first(
     client.post(f"/api/interview-sessions/{sid}/actions", json={"action": "CONFIRM_PROFILE"})
     provider = FakeProvider("groq", VALID)
     use_gateway(make_gateway(provider))
-    res = plan(client, sid, mode="PROJECT_DEEP_DIVE", use_ai=True)
+    res = plan(client, consented(client, sid), mode="PROJECT_DEEP_DIVE")
     assert res.status_code == 409 and "approved project" in res.json()["detail"]
     assert provider.calls == []  # no credits spent on a plan that can't be grounded
     assert session_row(db_session, sid)[:2] == ("INTERVIEW_PLANNING", None)
@@ -326,7 +334,7 @@ def test_cited_fact_rejected_during_the_call_is_409(
         db_session.commit()
 
     use_gateway(make_gateway(HookProvider(candidate_rejects_trustlens, VALID)))
-    res = plan(client, sid, use_ai=True)
+    res = plan(client, consented(client, sid))
     assert res.status_code == 409 and "profile changed" in res.json()["detail"]
     assert session_row(db_session, sid)[:2] == ("INTERVIEW_PLANNING", None)
     assert db_session.scalar(select(func.count()).select_from(ProviderCall)
@@ -342,7 +350,7 @@ def test_cited_fact_edited_during_the_call_is_409(
         db_session.commit()
 
     use_gateway(make_gateway(HookProvider(candidate_edits_react, VALID)))
-    assert plan(client, sid, use_ai=True).status_code == 409
+    assert plan(client, consented(client, sid)).status_code == 409
     assert session_row(db_session, sid)[:2] == ("INTERVIEW_PLANNING", None)
     # Recovery: simply plan again (the model now sees the edited fact).
     assert plan(client, sid).status_code == 200
@@ -356,7 +364,7 @@ def test_session_deleted_during_the_call_is_404_and_the_call_is_still_recorded(
         db_session.commit()
 
     use_gateway(make_gateway(HookProvider(candidate_discards_session, VALID)))
-    assert plan(client, sid, use_ai=True).status_code == 404
+    assert plan(client, consented(client, sid)).status_code == 404
     assert db_session.scalar(select(func.count()).select_from(ProviderCall)
                              .where(ProviderCall.capability == "INTERVIEW_PLANNING")) == 1
 
@@ -371,7 +379,7 @@ def test_session_planned_by_another_request_during_the_call_keeps_that_plan(
         db_session.commit()
 
     use_gateway(make_gateway(HookProvider(other_request_wins, VALID)))
-    res = plan(client, sid, use_ai=True)
+    res = plan(client, consented(client, sid))
     assert (res.status_code, res.json()["detail"]) == (
         409, "Cannot plan an interview session in READY.")
     assert session_row(db_session, sid)[:2] == ("READY", PLAN)
@@ -428,7 +436,7 @@ def test_logs_carry_ids_and_codes_only(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     use_gateway(make_gateway(FakeProvider("groq", INVENTED, VALID)))  # one rejection, then ok
-    assert plan(client, sid, use_ai=True).status_code == 200
+    assert plan(client, consented(client, sid)).status_code == 200
     assert "project_topic_needs_one_project" in caplog.text and sid in caplog.text
     for private in ("TrustLens", "React", "Kubernetes", "Teamwork", "Explain the architecture",
                     NAME, EMAIL, SOURCE_LINE):
@@ -489,10 +497,11 @@ def test_concurrent_plans_persist_exactly_once_without_holding_locks(
 
     def request() -> None:
         res = TestClient(app).post(f"/api/interview-sessions/{sid}/plan",
-                                   json={**SETTINGS, "mode": "PROJECT_DEEP_DIVE", "use_ai": True})
+                                   json={**SETTINGS, "mode": "PROJECT_DEEP_DIVE"})
         results.append(res.status_code)
 
     threads = [threading.Thread(target=request, daemon=True) for _ in range(2)]
+    consented(TestClient(app), sid)
     try:
         for thread in threads:
             thread.start()

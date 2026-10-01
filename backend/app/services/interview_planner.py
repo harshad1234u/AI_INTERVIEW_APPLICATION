@@ -10,6 +10,10 @@ Transaction contract: prepare_planning() ends its read transaction, so no connec
 held while a model is called. save_plan() flushes and the caller commits; on a lost race it rolls
 back, records the model calls on their own, and raises.
 
+Consent (PRD §48, D2b): the session's ai_consent decides whether a model may be asked at all
+(prepare_planning reads it) and is read again under the lock in save_plan: an AI plan made while
+consent was being withdrawn is discarded, and the deterministic plan is stored instead.
+
 Model calls are not exactly-once: two concurrent requests for the same session can both call a
 model. The lock + status re-check in save_plan() lets exactly one plan persist.
 """
@@ -166,19 +170,19 @@ def fact_refs(facts: list[FactSnapshot]) -> dict[str, FactSnapshot]:
     return {f"F{i}": fact for i, fact in enumerate(facts, 1)}
 
 
-def _phrase(text: str) -> re.Pattern[str]:
+def phrase_pattern(text: str) -> re.Pattern[str]:
     # Whole-phrase, case-insensitive; works for "C++" and "C#" too, where \b would not.
     return re.compile(rf"(?<!\w){re.escape(text)}(?!\w)", re.IGNORECASE)
 
 
-def _mentions(text: str, phrase: str) -> bool:
-    return _phrase(phrase).search(text) is not None
+def mentions(text: str, phrase: str) -> bool:
+    return phrase_pattern(phrase).search(text) is not None
 
 
-def _own_words(text: str, phrases: list[str]) -> str:
+def own_words(text: str, phrases: list[str]) -> str:
     """The text minus the given phrases (longest first): what the planner itself wrote."""
     for phrase in sorted(phrases, key=len, reverse=True):
-        text = _phrase(phrase).sub(" ", text)
+        text = phrase_pattern(phrase).sub(" ", text)
     return text
 
 
@@ -225,20 +229,20 @@ def build_plan(
             cited_projects = [f for f in cited if f.category == FactCategory.PROJECT]
             if len(cited_projects) != 1:
                 codes.add("project_topic_needs_one_project")
-            elif not _mentions(item.topic, cited_projects[0].fact):
+            elif not mentions(item.topic, cited_projects[0].fact):
                 codes.add("project_not_named")
-        if any(not any(_mentions(t, f.fact) for t in (item.topic, *item.question_templates))
+        if any(not any(mentions(t, f.fact) for t in (item.topic, *item.question_templates))
                for f in cited):
             codes.add("cited_fact_not_mentioned")  # a citation must be real, not decoration
         # The planner's own wording may not name an approved project it doesn't cite (that would
         # present a "generic" topic as being about the candidate), nor a §19 attribute.
-        own = [_own_words(t, [f.fact for f in cited] + [LABELS[item.competency]])
+        own = [own_words(t, [f.fact for f in cited] + [LABELS[item.competency]])
                for t in (item.topic, *item.question_templates, *item.expected_concepts)]
         # Only a model can write such a reference. The fallback's wording is fixed catalog text
         # whose only candidate text is the project it cites, so a match there is a word that
         # happens to be a project name ("worked in a team" vs a project called "Team").
         if source == PlanSource.AI and any(
-                _mentions(text, project) for text in own for project in projects):
+                mentions(text, project) for text in own for project in projects):
             codes.add("uncited_project")
         if any(SENSITIVE.search(text) for text in own):
             codes.add("sensitive_attribute")
@@ -332,6 +336,7 @@ class PlanningInput:
     candidate_id: uuid.UUID
     settings: PlanSettings
     facts: list[FactSnapshot]  # APPROVED only, in ref order
+    ai_consent: bool  # when the read transaction ended; save_plan re-reads it under the lock
 
 
 def approved_facts(db: Session, candidate_id: uuid.UUID) -> list[FactSnapshot]:
@@ -355,23 +360,29 @@ def prepare_planning(db: Session, session_id: uuid.UUID, settings: PlanSettings)
         raise PlanningNotAllowed(session.status)
     facts = approved_facts(db, session.candidate_id)
     plan_groups(settings, facts)  # e.g. project deep dive without a project: ask, call no model
-    result = PlanningInput(session.id, session.candidate_id, settings, facts)
+    result = PlanningInput(session.id, session.candidate_id, settings, facts, session.ai_consent)
     db.commit()  # releases the connection: none is held while a model runs
     return result
 
 
 def save_plan(
     db: Session, inputs: PlanningInput, plan: InterviewPlan, records: list[CallRecord]
-) -> InterviewSession:
+) -> tuple[InterviewSession, InterviewPlan]:
     """Store the plan with PLAN_READY under the row lock, re-checking everything that may have
-    changed during the model call. The caller commits."""
+    changed during the model call, consent included. Returns the plan actually stored. The caller
+    commits."""
     calls = [ProviderCall.from_record(r) for r in records]
     try:
         db.add_all(calls)
         db.flush()
         session = apply_event(db, inputs.session_id, SessionEvent.PLAN_READY,
                               plan=plan.model_dump(mode="json"))
-        _require_cited_facts_unchanged(db, session.candidate_id, plan)
+        if plan.source == PlanSource.AI and not session.ai_consent:
+            # Withdrawn while the model ran: its output is discarded, never stored (D2b).
+            plan = fallback_plan(inputs.settings, inputs.facts, RulesReason.CONSENT_WITHDRAWN)
+            session.plan = plan.model_dump(mode="json")
+            db.flush()
+        require_cited_facts_unchanged(db, session.candidate_id, plan)
         if plan.source == PlanSource.AI:
             session.plan_provider_call_id = next(c.id for c in reversed(calls) if c.succeeded)
             db.flush()
@@ -387,10 +398,10 @@ def save_plan(
         raise
     logger.info("Interview session %s planned: source=%s reason=%s topics=%d",
                 session.id, plan.source, plan.rules_reason, len(plan.topics))
-    return session
+    return session, plan
 
 
-def _require_cited_facts_unchanged(
+def require_cited_facts_unchanged(
     db: Session, candidate_id: uuid.UUID, plan: InterviewPlan
 ) -> None:
     cited = {f.fact_id: f for topic in plan.topics for f in topic.facts}
