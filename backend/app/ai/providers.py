@@ -1,0 +1,162 @@
+"""Provider adapters: the only code that knows provider URLs, auth and wire formats.
+
+Groq, Gemini and NVIDIA all document an OpenAI-compatible Chat Completions endpoint with
+`response_format` JSON-schema output, so one adapter class serves all three, configured by base
+URL. Plain HTTPS via httpx2: no vendor SDKs.
+
+  groq    https://console.groq.com/docs/structured-outputs
+  gemini  https://ai.google.dev/gemini-api/docs/openai  (beta; unsupported params are ignored)
+  nvidia  https://docs.api.nvidia.com/nim/reference/llm-apis
+
+Provider JSON modes differ (Gemini's layer may ignore the schema, NVIDIA prefers its own
+extension), so provider output is never trusted: the gateway validates every response itself.
+"""
+
+from functools import lru_cache
+from typing import Any
+
+import httpx2 as httpx
+from pydantic import SecretStr
+
+from app.ai.gateway import (
+    ErrorKind,
+    ModelCapability,
+    ModelGateway,
+    ModelRequest,
+    ProviderError,
+    RawCompletion,
+)
+from app.core.config import Settings, get_settings
+
+BASE_URLS = {
+    "groq": "https://api.groq.com/openai/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+}
+
+# Extra request fields per provider, from the model docs and verified live (2026-10-01).
+EXTRA_BODY: dict[str, dict[str, Any]] = {
+    # Nemotron 3 thinks by default: 28 s and ~880 output tokens for a 7-line resume, over the
+    # 20 s timeout. Extraction copies text, it needs no reasoning. Other NVIDIA chat templates
+    # ignore unknown kwargs.
+    "nvidia": {"chat_template_kwargs": {"enable_thinking": False}},
+}
+
+
+def _status_kind(status: int, body: bytes) -> ErrorKind:
+    # Gemini answers a bad key with 400 "Please pass a valid API key" / "API key not valid".
+    if status in (401, 403) or (status == 400 and b"valid api key" in body.lower()):
+        return ErrorKind.AUTH
+    if status == 404:  # all three: unknown model, or not available to this account
+        return ErrorKind.MODEL_UNAVAILABLE
+    if status == 429:
+        return ErrorKind.RATE_LIMITED
+    if status == 408:
+        return ErrorKind.TIMEOUT
+    if status >= 500:
+        return ErrorKind.SERVER_ERROR
+    return ErrorKind.BAD_REQUEST
+
+
+def _count(value: Any) -> int | None:
+    # Reported usage only: anything missing or odd stays None rather than being guessed.
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+class OpenAICompatibleProvider:
+    def __init__(
+        self,
+        name: str,
+        api_key: SecretStr,
+        model: str,
+        *,
+        timeout_seconds: float,
+        base_url: str | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.name, self.model = name, model
+        self._api_key = api_key  # SecretStr: prints as '**********'
+        self._base_url = base_url or BASE_URLS[name]
+        self._timeout = timeout_seconds
+        self._transport = transport
+
+    def __repr__(self) -> str:
+        return f"OpenAICompatibleProvider({self.name!r}, model={self.model!r})"
+
+    async def complete(
+        self, request: ModelRequest, json_schema: dict[str, Any], max_output_tokens: int
+    ) -> RawCompletion:
+        payload = {
+            "model": self.model,
+            # Trusted instructions and (delimited) untrusted content stay in separate messages.
+            "messages": [
+                {"role": "system", "content": request.system_instruction},
+                {"role": "user", "content": request.user_content},
+            ],
+            "temperature": request.temperature,
+            "max_tokens": max_output_tokens,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "response", "schema": json_schema},
+            },
+            **EXTRA_BODY.get(self.name, {}),
+        }
+        headers = {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url, timeout=self._timeout, transport=self._transport
+            ) as client:
+                res = await client.post("/chat/completions", json=payload, headers=headers)
+        except httpx.TimeoutException:
+            raise ProviderError(ErrorKind.TIMEOUT) from None
+        except httpx.TransportError:
+            raise ProviderError(ErrorKind.CONNECTION) from None
+        if res.status_code != 200:
+            # Status code only: provider error bodies can echo the request content.
+            raise ProviderError(_status_kind(res.status_code, res.content), f"HTTP {res.status_code}")
+        try:
+            body = res.json()
+            choice = body["choices"][0]
+            text = choice["message"].get("content") or ""
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise ProviderError(ErrorKind.INVALID_OUTPUT, "malformed_response") from None
+        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        return RawCompletion(
+            text=text if isinstance(text, str) else "",
+            model=body.get("model") if isinstance(body.get("model"), str) else self.model,
+            finish_reason=choice.get("finish_reason"),
+            provider_request_id=body.get("id") if isinstance(body.get("id"), str) else None,
+            input_tokens=_count(usage.get("prompt_tokens")),
+            output_tokens=_count(usage.get("completion_tokens")),
+            total_tokens=_count(usage.get("total_tokens")),
+        )
+
+
+def build_gateway(
+    settings: Settings, transport: httpx.AsyncBaseTransport | None = None
+) -> ModelGateway | None:
+    """None when AI_PROVIDERS is empty: callers then keep the deterministic path only."""
+    providers = [
+        OpenAICompatibleProvider(
+            name,
+            getattr(settings, f"{name}_api_key"),
+            getattr(settings, f"{name}_model"),
+            timeout_seconds=settings.ai_timeout_seconds,
+            transport=transport,
+        )
+        for name in settings.ai_provider_list
+    ]
+    if not providers:
+        return None
+    # Capability routing: every capability currently uses the configured provider order.
+    return ModelGateway(
+        {capability: providers for capability in ModelCapability},
+        timeout_seconds=settings.ai_timeout_seconds,
+        max_retries=settings.ai_max_retries,
+        max_output_tokens=settings.ai_max_output_tokens,
+    )
+
+
+@lru_cache
+def get_model_gateway() -> ModelGateway | None:
+    return build_gateway(get_settings())

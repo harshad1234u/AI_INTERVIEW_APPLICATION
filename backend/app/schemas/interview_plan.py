@@ -1,0 +1,199 @@
+"""Interview plan contracts (PRD §8, §14, §42): planning settings, the model's proposal, the stored plan.
+
+Three different shapes on purpose:
+- PlanRequest: what the client chooses. Closed sets only, so no client free text reaches a prompt.
+- PlanProposal: the only thing a model may return. No status, approval, score, id, difficulty or
+  fact fields: it can cite approved facts by ref, never add or change one.
+- InterviewPlan: what the application stores after validation. Built by code, never by the model.
+"""
+
+import uuid
+from enum import StrEnum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+from app.models.interview_session import InterviewStatus
+from app.models.resume import FACT_MAX_LENGTH, FactCategory
+
+MINUTES_PER_TOPIC = 3  # duration // 3 = topic budget; 15 min -> 5 topics, as in the PRD §58 example
+MAX_TOPICS = 45 // MINUTES_PER_TOPIC
+
+
+class TargetRole(StrEnum):
+    SOFTWARE_DEVELOPER_INTERN = "SOFTWARE_DEVELOPER_INTERN"  # the PRD §8 example, the only one defined
+
+
+class ExperienceLevel(StrEnum):
+    """Self-reported by the candidate (PRD §4 user groups). Never a verified candidate fact."""
+
+    STUDENT = "STUDENT"
+    FRESH_GRADUATE = "FRESH_GRADUATE"
+    ENTRY_LEVEL = "ENTRY_LEVEL"
+    INTERNSHIP_APPLICANT = "INTERNSHIP_APPLICANT"
+
+
+class InterviewMode(StrEnum):
+    TECHNICAL = "TECHNICAL"
+    BEHAVIORAL = "BEHAVIORAL"
+    PROJECT_DEEP_DIVE = "PROJECT_DEEP_DIVE"
+    MIXED = "MIXED"
+
+
+class Difficulty(StrEnum):
+    EASY = "EASY"
+    MEDIUM = "MEDIUM"
+    HARD = "HARD"
+
+
+class Competency(StrEnum):
+    # PRD §8 "Software Developer Intern" competencies, plus HR from §42 Mixed Placement.
+    # Lower-case values as in the PRD's own JSON (§9: "competency": "project_understanding").
+    PROGRAMMING_FUNDAMENTALS = "programming_fundamentals"
+    DATA_STRUCTURES = "data_structures"
+    DATABASE = "database"
+    WEB_DEVELOPMENT = "web_development"
+    PROJECT_UNDERSTANDING = "project_understanding"
+    BEHAVIORAL = "behavioral"
+    HR = "hr"
+
+
+class QuestionType(StrEnum):
+    """The §42 groups. Derived from the competency by code, never chosen by the model."""
+
+    TECHNICAL = "TECHNICAL"
+    PROJECT = "PROJECT"
+    BEHAVIORAL = "BEHAVIORAL"
+    HR = "HR"
+
+
+class TopicBasis(StrEnum):
+    """Derived from citations by code. GENERIC topics say nothing about the candidate."""
+
+    GENERIC = "GENERIC"  # a domain/behavioral question; no candidate fact behind it
+    CANDIDATE_FACT = "CANDIDATE_FACT"  # about the cited, candidate-approved facts
+
+
+class PlanSource(StrEnum):
+    AI = "AI"  # model proposal that passed validation
+    RULES = "RULES"  # deterministic plan (same validation)
+
+
+class RulesReason(StrEnum):
+    """Why a RULES plan was used. Never silent."""
+
+    NOT_REQUESTED = "NOT_REQUESTED"  # use_ai was false
+    NOT_CONFIGURED = "NOT_CONFIGURED"  # no AI provider on this server
+    PROVIDERS_FAILED = "PROVIDERS_FAILED"  # every provider failed (timeout, auth, rate limit, ...)
+    OUTPUT_REJECTED = "OUTPUT_REJECTED"  # proposals failed validation twice
+
+
+Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+TopicText = Annotated[Text, StringConstraints(max_length=FACT_MAX_LENGTH + 50)]
+QuestionText = Annotated[Text, StringConstraints(max_length=FACT_MAX_LENGTH + 100)]
+ConceptText = Annotated[Text, StringConstraints(max_length=80)]
+FactRef = Annotated[str, StringConstraints(pattern=r"^F[1-9][0-9]{0,3}$")]
+
+
+class PlanSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_role: TargetRole
+    experience_level: ExperienceLevel
+    mode: InterviewMode
+    difficulty: Difficulty
+    duration_minutes: Literal[15, 30, 45]
+
+
+class PlanRequest(PlanSettings):
+    # Explicit consent to send the candidate's approved facts to an external AI provider (PRD §48).
+    use_ai: bool = False
+
+
+# ---------- model proposal (the only shape a model may return) ----------
+
+
+class TopicProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    competency: Competency
+    topic: TopicText
+    fact_refs: list[FactRef] = Field(max_length=3)
+    question_templates: list[QuestionText] = Field(min_length=1, max_length=3)
+    expected_concepts: list[ConceptText] = Field(max_length=8)
+
+
+class PlanProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    topics: list[TopicProposal] = Field(min_length=1, max_length=MAX_TOPICS)
+
+
+# ---------- stored plan ----------
+
+
+class FactSnapshot(BaseModel):
+    """An APPROVED fact as it was when the plan was made. Plan context only: never a new fact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fact_id: uuid.UUID
+    category: FactCategory
+    fact: str
+
+
+class PlannedTopic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    position: int = Field(ge=1)
+    competency: Competency
+    question_type: QuestionType
+    difficulty: Difficulty
+    basis: TopicBasis
+    topic: TopicText
+    question_templates: list[QuestionText] = Field(min_length=1, max_length=3)
+    expected_concepts: list[ConceptText] = Field(max_length=8)
+    facts: list[FactSnapshot] = Field(max_length=3)
+
+
+class InterviewPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    source: PlanSource
+    rules_reason: RulesReason | None
+    settings: PlanSettings
+    competencies: list[Competency]
+    # §42 groups the mode includes but the plan leaves out, e.g. PROJECT in MIXED mode when the
+    # candidate has no approved project: nothing is invented to fill it.
+    omitted_groups: list[QuestionType]
+    topics: list[PlannedTopic] = Field(min_length=1, max_length=MAX_TOPICS)
+
+
+# ---------- API responses ----------
+
+
+class ModelCallSummary(BaseModel):
+    """Operational metadata of one gateway call. No prompt or output content."""
+
+    request_id: str
+    requested_provider: str | None
+    provider: str | None  # None = no provider answered
+    model: str | None
+    fallback_used: bool
+    attempts: int
+    error_type: str | None
+    latency_ms: int
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+
+
+class InterviewPlanView(BaseModel):
+    session_id: uuid.UUID
+    status: InterviewStatus
+    plan: InterviewPlan
+
+
+class InterviewPlanResult(InterviewPlanView):
+    model_calls: list[ModelCallSummary]  # empty when no model was asked
