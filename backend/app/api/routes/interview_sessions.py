@@ -10,11 +10,13 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.ai.gateway import CallRecord, ModelGateway
+from app.ai.interviewer_agent import WordingRequest, propose_wording
 from app.ai.planner_agent import PlannerOutcome, propose_plan
 from app.ai.providers import get_model_gateway
 from app.api.routes.candidates import get_candidate
 from app.db.session import get_db
-from app.models import Candidate, InterviewSession
+from app.models import Candidate, InterviewQuestion, InterviewSession
+from app.models.interview_question import ANSWER_MAX_LENGTH, AnswerKind
 from app.schemas.interview_plan import (
     InterviewPlan,
     InterviewPlanResult,
@@ -28,7 +30,20 @@ from app.schemas.interview_session import (
     InterviewSessionResponse,
     SessionActionRequest,
 )
-from app.schemas.interview_turn import ConsentHistory, ConsentRequest, ConsentState
+from app.schemas.interview_turn import (
+    AnswerRequest,
+    AnswerResult,
+    AnswerView,
+    ConsentHistory,
+    ConsentRequest,
+    ConsentState,
+    Evaluation,
+    NextQuestionRequest,
+    Progress,
+    QuestionHistory,
+    QuestionView,
+    TurnResult,
+)
 from app.services.interview_planner import (
     PlanningNotAllowed,
     PlanRejected,
@@ -38,7 +53,24 @@ from app.services.interview_planner import (
     prepare_planning,
     save_plan,
 )
-from app.services.interviewer import ConsentNotAllowed, consent_history, set_consent
+from app.services.interviewer import (
+    ConsentNotAllowed,
+    LateAnswer,
+    PendingTurn,
+    QuestionNotFound,
+    TurnNotAllowed,
+    TurnOutcome,
+    consent_history,
+    elapsed_seconds,
+    load_history,
+    lock_and_enforce_deadline,
+    prepare_turn,
+    save_turn,
+    set_consent,
+    stored_plan,
+    submit_answer,
+    time_remaining_display,
+)
 from app.services.interview_state_machine import (
     ActiveSessionExists,
     InvalidTransition,
@@ -139,6 +171,10 @@ def act_on_interview_session(
     session_id: uuid.UUID, body: SessionActionRequest, db: Session = Depends(get_db)
 ) -> InterviewSession:
     try:
+        # Every interview write first applies the time limit (Phase 7, §6.3). The closure is
+        # committed on its own, then the action is checked against the closed session.
+        if lock_and_enforce_deadline(db, session_id):
+            _commit(db)
         session = apply_event(db, session_id, SessionEvent(body.action))
     except SessionNotFound:
         db.rollback()
@@ -252,3 +288,108 @@ def get_ai_consent(
 ) -> ConsentHistory:
     return ConsentHistory(session_id=session.id, granted=session.ai_consent,
                           history=consent_history(db, session.id))
+
+
+# ---------- interview turns (Phase 7) ----------
+
+ANSWER_TOO_LONG = f"Answer is too long: the limit is {ANSWER_MAX_LENGTH:,} characters."
+
+
+def _question_view(plan: InterviewPlan, q: InterviewQuestion) -> QuestionView:
+    topic = plan.topics[q.topic_position - 1]
+    answer = None if q.answered_at is None else AnswerView(
+        kind=q.answer_kind, text=q.answer_text, answered_at=q.answered_at,
+        evaluation=Evaluation(status=q.evaluation_status))
+    return QuestionView(
+        id=q.id, seq=q.seq, topic_position=q.topic_position, topic=topic.topic,
+        competency=topic.competency, question_type=topic.question_type,
+        difficulty=topic.difficulty, basis=topic.basis, kind=q.kind,
+        followup_index=q.followup_index, rephrase_index=q.rephrase_index, text=q.text,
+        source=q.source, rules_reason=q.rules_reason, asked_at=q.asked_at, answer=answer)
+
+
+def _progress(plan: InterviewPlan, elapsed: float) -> Progress:
+    limit = plan.settings.duration_minutes * 60
+    return Progress(topics_total=len(plan.topics),
+                    time_remaining_seconds=time_remaining_display(limit - elapsed),
+                    deadline_reached=elapsed >= limit)
+
+
+def _turn_result(turn: TurnOutcome) -> TurnResult:
+    session = turn.session
+    return TurnResult(
+        session_id=session.id, status=session.status, finish_reason=session.finish_reason,
+        ai_consent=session.ai_consent,
+        question=_question_view(turn.plan, turn.question) if turn.question else None,
+        progress=_progress(turn.plan, turn.elapsed), model_calls=_call_summaries(turn.records))
+
+
+@router.post("/interview-sessions/{session_id}/questions/next", response_model=TurnResult)
+def next_question(
+    session_id: uuid.UUID,
+    body: NextQuestionRequest,
+    db: Session = Depends(get_db),
+    gateway: ModelGateway | None = Depends(get_model_gateway),
+) -> TurnResult:
+    """The question to answer now. Code decides what it is (topic, follow-up, rephrase) or that
+    the interview is over; a model may only word a follow-up or rephrase, with consent. While a
+    question is open this returns it again, with no model call."""
+    try:
+        turn = prepare_turn(db, session_id, model_available=gateway is not None)
+        if isinstance(turn, PendingTurn):
+            # No DB connection or lock is held from here until save_turn.
+            request = WordingRequest(turn.topic, turn.answer, turn.original_question)
+            outcome = anyio.from_thread.run(propose_wording, gateway, request, turn.codes,
+                                            turn.deadline)
+            turn = save_turn(db, turn, outcome)
+    except SessionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
+    except TurnNotAllowed as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    _commit(db)
+    return _turn_result(turn)
+
+
+@router.post("/interview-sessions/{session_id}/answers", response_model=AnswerResult)
+def answer_question(
+    session_id: uuid.UUID, body: AnswerRequest, db: Session = Depends(get_db)
+) -> AnswerResult:
+    """Store the answer to the open question (NOT_EVALUATED). Late answers are refused and never
+    stored. Repeating a stored answer exactly changes nothing."""
+    text = (body.text or "").strip()
+    # Checked before the session is touched: an oversized answer writes nothing (D5).
+    if len(text) > ANSWER_MAX_LENGTH:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, ANSWER_TOO_LONG)
+    if body.kind == AnswerKind.ANSWER and not text:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "An answer needs text.")
+    try:
+        session, question = submit_answer(db, session_id, body.question_id, body.kind, text)
+    except (SessionNotFound, QuestionNotFound) as exc:
+        db.rollback()
+        detail = NOT_FOUND if isinstance(exc, SessionNotFound) else "Question not found"
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail) from None
+    except (LateAnswer, TurnNotAllowed) as exc:
+        db.rollback()  # a deadline closure was already committed; nothing else is kept
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    plan = stored_plan(session)
+    _commit(db)
+    return AnswerResult(session_id=session.id, status=session.status,
+                        question=_question_view(plan, question))
+
+
+@router.get("/interview-sessions/{session_id}/questions", response_model=QuestionHistory)
+def read_questions(
+    session: InterviewSession = Depends(get_interview_session), db: Session = Depends(get_db)
+) -> QuestionHistory:
+    """Questions and answers so far. Reading never changes the session (the deadline is applied
+    by the next write request), but progress reports whether it has been reached."""
+    if session.plan is None:
+        return QuestionHistory(session_id=session.id, status=session.status,
+                               finish_reason=session.finish_reason, progress=None, questions=[])
+    plan = stored_plan(session)
+    return QuestionHistory(
+        session_id=session.id, status=session.status, finish_reason=session.finish_reason,
+        progress=_progress(plan, elapsed_seconds(db, session)),
+        questions=[_question_view(plan, q) for q in load_history(db, session.id)])
