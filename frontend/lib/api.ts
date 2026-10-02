@@ -163,3 +163,322 @@ export const runAiExtraction = (resumeId: string) =>
 
 export const deleteResume = (resumeId: string) =>
   request<void>(`/api/resumes/${encodeURIComponent(resumeId)}`, { method: "DELETE" });
+
+// ---------- interview sessions (backend Phases 5-10) ----------
+// Field names and value sets mirror the backend Pydantic schemas. Every decision about the
+// interview (state, questions, timing, evaluation, report) is the server's.
+
+export type InterviewStatus =
+  | "CREATED"
+  | "PROFILE_PROCESSING"
+  | "PROFILE_REVIEW"
+  | "INTERVIEW_PLANNING"
+  | "READY"
+  | "ASKING"
+  | "WAITING_FOR_ANSWER"
+  | "PAUSED"
+  | "ANSWER_PROCESSING"
+  | "ANSWER_EVALUATION"
+  | "NEXT_DECISION"
+  | "REPORT_GENERATION"
+  | "COMPLETED";
+
+export type ClientAction =
+  | "CONFIRM_PROFILE"
+  | "START_INTERVIEW"
+  | "PAUSE"
+  | "RESUME"
+  | "END_INTERVIEW";
+
+export type FinishReason = "PLAN_COMPLETED" | "TIME_LIMIT" | "CANDIDATE_ENDED" | "NO_ELIGIBLE_TOPIC";
+export type RulesReason =
+  | "NOT_REQUESTED"
+  | "NOT_CONFIGURED"
+  | "PROVIDERS_FAILED"
+  | "OUTPUT_REJECTED"
+  | "CONSENT_WITHDRAWN";
+
+export type InterviewSession = {
+  id: string;
+  candidate_id: string;
+  status: InterviewStatus;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TargetRole = "SOFTWARE_DEVELOPER_INTERN";
+export type ExperienceLevel = "STUDENT" | "FRESH_GRADUATE" | "ENTRY_LEVEL" | "INTERNSHIP_APPLICANT";
+export type InterviewMode = "TECHNICAL" | "BEHAVIORAL" | "PROJECT_DEEP_DIVE" | "MIXED";
+export type Difficulty = "EASY" | "MEDIUM" | "HARD";
+export type Duration = 15 | 30 | 45;
+export type Competency =
+  | "programming_fundamentals"
+  | "data_structures"
+  | "database"
+  | "web_development"
+  | "project_understanding"
+  | "behavioral"
+  | "hr";
+export type QuestionType = "TECHNICAL" | "PROJECT" | "BEHAVIORAL" | "HR";
+export type Source = "AI" | "RULES";
+
+export type PlanSettings = {
+  target_role: TargetRole;
+  experience_level: ExperienceLevel;
+  mode: InterviewMode;
+  difficulty: Difficulty;
+  duration_minutes: Duration;
+};
+
+export type PlannedTopic = {
+  position: number;
+  competency: Competency;
+  question_type: QuestionType;
+  difficulty: Difficulty;
+  basis: "GENERIC" | "CANDIDATE_FACT";
+  topic: string;
+  question_templates: string[];
+  expected_concepts: string[];
+  facts: { fact_id: string; category: FactCategory; fact: string }[];
+};
+
+export type InterviewPlan = {
+  version: 1;
+  source: Source;
+  rules_reason: RulesReason | null;
+  settings: PlanSettings;
+  competencies: Competency[];
+  omitted_groups: QuestionType[];
+  topics: PlannedTopic[];
+};
+
+/** GET/POST .../plan and POST .../retry (the new session). */
+export type InterviewPlanView = { session_id: string; status: InterviewStatus; plan: InterviewPlan };
+
+export type ConsentState = { session_id: string; granted: boolean; changed_at: string | null };
+export type ConsentHistory = {
+  session_id: string;
+  granted: boolean;
+  history: { granted: boolean; changed_at: string }[];
+};
+
+export type AnswerKind = "ANSWER" | "CLARIFY" | "DONT_KNOW" | "SKIP";
+export type QuestionKind = "TOPIC" | "FOLLOW_UP" | "REPHRASE";
+export type EvaluationStatus = "NOT_EVALUATED" | "NOT_APPLICABLE" | "OBSERVATIONS_ONLY" | "EVALUATED";
+export type Criterion =
+  | "relevance"
+  | "completeness"
+  | "reasoning"
+  | "communication"
+  | "structure"
+  | "specificity"
+  | "evidence"
+  | "reflection"
+  | "outcome";
+
+export type EvaluationView = {
+  rubric: "TECHNICAL_PROJECT" | "BEHAVIORAL_HR";
+  rubric_version: number;
+  source: Source;
+  rules_reason: RulesReason | null;
+  criteria: { criterion: Criterion; score: number | null; evidence: string[] }[];
+  missing_concepts: string[];
+  claims_to_verify: { quote: string; status: "NEEDS_VERIFICATION" }[];
+  feedback: string | null;
+  observations: { word_count: number; planned_concepts: string[]; concepts_mentioned: string[] };
+  created_at: string;
+  updated_at: string;
+};
+
+export type QuestionView = {
+  id: string;
+  seq: number;
+  topic_position: number;
+  topic: string;
+  competency: Competency;
+  question_type: QuestionType;
+  difficulty: Difficulty;
+  basis: "GENERIC" | "CANDIDATE_FACT";
+  kind: QuestionKind;
+  followup_index: number;
+  rephrase_index: number;
+  text: string;
+  source: Source;
+  rules_reason: RulesReason | null;
+  asked_at: string;
+  answer: {
+    kind: AnswerKind;
+    text: string | null;
+    answered_at: string;
+    evaluation: { status: EvaluationStatus; detail?: EvaluationView };
+  } | null;
+};
+
+export type Progress = {
+  topics_total: number;
+  time_remaining_seconds: number;
+  deadline_reached: boolean;
+};
+
+export type TurnResult = {
+  session_id: string;
+  status: InterviewStatus;
+  finish_reason: FinishReason | null;
+  ai_consent: boolean;
+  question: QuestionView | null;
+  progress: Progress;
+};
+
+export type AnswerResult = { session_id: string; status: InterviewStatus; question: QuestionView };
+
+export type QuestionHistory = {
+  session_id: string;
+  status: InterviewStatus;
+  finish_reason: FinishReason | null;
+  progress: Progress | null;
+  questions: QuestionView[];
+};
+
+export type EvaluationResult = {
+  session_id: string;
+  question_id: string;
+  status: EvaluationStatus;
+  evaluation: EvaluationView | null;
+  notice: string | null;
+};
+
+type ItemRef = { question_id: string; seq: number; topic_position: number };
+type CriterionItem = ItemRef & {
+  criterion: Criterion;
+  score: number;
+  score_meaning: string;
+  evidence: string[];
+};
+export type Unavailable = { available: false; note: string };
+
+export type InterviewReport = {
+  summary: {
+    settings: PlanSettings;
+    plan_source: Source;
+    finish_reason: FinishReason | null;
+    finish_reason_text: string;
+    active_seconds: number;
+    questions_asked: number;
+    answers: { answer: number; skip: number; dont_know: number; clarify: number; unanswered: number };
+    evaluations: {
+      evaluated: number;
+      observations_only: number;
+      not_applicable: number;
+      not_evaluated: number;
+    };
+  };
+  questions: (ItemRef & {
+    kind: QuestionKind;
+    text: string;
+    answer_kind: AnswerKind | null;
+    answer_note: string;
+    evaluation_status: EvaluationStatus | null;
+  })[];
+  coverage: {
+    topics: {
+      topic_position: number;
+      topic: string;
+      competency: Competency;
+      question_type: QuestionType;
+      questions_asked: number;
+      note: string | null;
+    }[];
+    competencies: { competency: Competency; planned_topics: number; asked_topics: number }[];
+  };
+  shown_clearly: CriterionItem[];
+  to_practise: {
+    criteria: (CriterionItem & { practice: string })[];
+    missing_concepts: (ItemRef & { concept: string; practice: string })[];
+  };
+  answer_evidence: (ItemRef & {
+    status: EvaluationStatus;
+    evaluation: EvaluationView;
+    notice: string | null;
+  })[];
+  communication_observations: {
+    answers: { question_id: string; seq: number; word_count: number; concepts_mentioned: string[] }[];
+    speech_metrics: Unavailable;
+  };
+  topics_to_practise: {
+    topic_position: number;
+    topic: string;
+    competency: Competency;
+    criteria: Criterion[];
+    missing_concepts: string[];
+  }[];
+  recommended_practice: { practice: string; question_ids: string[] }[];
+  retry: { available: boolean; note: string };
+  score_scale: Record<string, string>;
+  limitations: string;
+};
+
+export type ReportResult = { session_id: string; status: InterviewStatus; report: InterviewReport };
+
+const sessionPath = (id: string) => `/api/interview-sessions/${encodeURIComponent(id)}`;
+const post = (body: unknown = {}): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
+
+export const listInterviewSessions = (candidateId: string, signal?: AbortSignal) =>
+  request<InterviewSession[]>(
+    `/api/candidates/${encodeURIComponent(candidateId)}/interview-sessions`,
+    { signal },
+  );
+
+export const createInterviewSession = (candidateId: string) =>
+  request<InterviewSession>("/api/interview-sessions", post({ candidate_id: candidateId }));
+
+export const getInterviewSession = (id: string, signal?: AbortSignal) =>
+  request<InterviewSession>(sessionPath(id), { signal });
+
+export const actOnSession = (id: string, action: ClientAction) =>
+  request<InterviewSession>(`${sessionPath(id)}/actions`, post({ action }));
+
+export const deleteInterviewSession = (id: string) =>
+  request<void>(sessionPath(id), { method: "DELETE" });
+
+export const planInterview = (id: string, settings: PlanSettings) =>
+  request<InterviewPlanView>(`${sessionPath(id)}/plan`, post(settings));
+
+export const getInterviewPlan = (id: string, signal?: AbortSignal) =>
+  request<InterviewPlanView>(`${sessionPath(id)}/plan`, { signal });
+
+export const getConsent = (id: string, signal?: AbortSignal) =>
+  request<ConsentHistory>(`${sessionPath(id)}/ai-consent`, { signal });
+
+export const setConsent = (id: string, granted: boolean) =>
+  request<ConsentState>(`${sessionPath(id)}/ai-consent`, {
+    method: "PUT",
+    body: JSON.stringify({ granted }),
+  });
+
+export const nextQuestion = (id: string) =>
+  request<TurnResult>(`${sessionPath(id)}/questions/next`, post());
+
+// Only ANSWER carries text; the other kinds send none (the backend's contract).
+export const submitAnswer = (id: string, questionId: string, kind: AnswerKind, text?: string) =>
+  request<AnswerResult>(
+    `${sessionPath(id)}/answers`,
+    post(kind === "ANSWER" ? { question_id: questionId, kind, text } : { question_id: questionId, kind }),
+  );
+
+export const getQuestions = (id: string, signal?: AbortSignal) =>
+  request<QuestionHistory>(`${sessionPath(id)}/questions`, { signal });
+
+export const evaluateAnswer = (id: string, questionId: string) =>
+  request<EvaluationResult>(
+    `${sessionPath(id)}/questions/${encodeURIComponent(questionId)}/evaluation`,
+    post(),
+  );
+
+export const generateReport = (id: string) =>
+  request<ReportResult>(`${sessionPath(id)}/report`, post());
+
+export const getReport = (id: string, signal?: AbortSignal) =>
+  request<ReportResult>(`${sessionPath(id)}/report`, { signal });
+
+export const retryInterview = (id: string) =>
+  request<InterviewPlanView>(`${sessionPath(id)}/retry`, post());
