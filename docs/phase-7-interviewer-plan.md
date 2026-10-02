@@ -814,3 +814,27 @@ Approved after the Phase 7 commits (`97c0849`..`d0ad69d`). They supersede the se
 - **Also fixed in the same branch:** if the 60 s reserve is crossed between `enforce_deadline` and
   `decide()` while in ASKING, the session now gets `TIME_EXPIRED` (`TIME_LIMIT`). Before, it got the
   "profile changed" 409.
+
+### B. Technical fallback questions were duplicates of each other
+
+- **Problem:** every technical area shared one Phase 6 frame, `"Explain a core concept in {area} and
+  give an example of where it is used."`. Under §33 (ratio ≥ 0.85) Data Structures/Database scored
+  0.929, Programming Fundamentals/Database 0.866 and Database/Web Development 0.877. A consent-off
+  TECHNICAL interview therefore skipped topics.
+- **Decision:** the duplicate rule is unchanged (threshold 0.85, plan questions still checked). The
+  catalog was reworded instead: `TECHNICAL_QUESTIONS` has one fixed, curated question per technical
+  competency (PRD §32), on its own concept:
+  - recursion vs loops;
+  - hash map vs array;
+  - database indexes;
+  - what happens when a page loads.
+
+  The worst pair is now 0.454. Topic titles, expected concepts (§42 focus), difficulty, ownership
+  and the plan contract are unchanged, and no model or randomness is involved.
+- **Tests:**
+  - every pair in the whole fallback catalog (technical, project with several names, behavioral,
+    HR, generic follow-up), plus framed rephrases, is not a duplicate;
+  - the old frame is still detected as a duplicate;
+  - a duplicate plan question is still skipped;
+  - all four technical topics are asked with consent off, and with consent on but deterministic
+    (providers failing, or none configured), for both ANSWER and SKIP progressions.

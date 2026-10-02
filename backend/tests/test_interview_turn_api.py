@@ -25,7 +25,7 @@ from app.db.session import SessionLocal, engine
 from app.main import app, create_app
 from app.models import Candidate, InterviewQuestion, ProviderCall
 from app.models.resume import FactCategory as FC, FactStatus
-from app.services.interview_planner import approved_facts, fallback_plan
+from app.services.interview_planner import TECHNICAL_QUESTIONS, approved_facts, fallback_plan
 from app.services.interview_state_machine import SessionEvent as E, apply_event, create_session
 from app.services.interviewer import (
     FOLLOW_UP_TEMPLATE,
@@ -39,7 +39,7 @@ from app.services.interviewer import (
     stored_plan,
     valid_positions,
 )
-from app.schemas.interview_plan import PlanSettings, RulesReason
+from app.schemas.interview_plan import Competency, PlanSettings, RulesReason
 from tests.fakes import FakeProvider, make_gateway
 from tests.test_interview_plan_api import (  # noqa: F401  (fixtures)
     EMAIL,
@@ -59,8 +59,7 @@ ANSWER = "I usually reason about the trade-offs first, then the implementation."
 SECRET_ANSWER = "My private answer text 7f3a about trade-offs"
 # Fallback MIXED plan for TrustLens + React: 1 Programming Fundamentals, 2 Data Structures,
 # 3 Project: TrustLens, 4 Teamwork, 5 Motivation.
-TOPIC_1 = ("Explain a core concept in programming fundamentals and give an example of where it is "
-           "used.")
+TOPIC_1 = TECHNICAL_QUESTIONS[Competency.PROGRAMMING_FUNDAMENTALS]
 
 
 # ---------- helpers ----------
@@ -155,7 +154,7 @@ def test_a_full_interview_without_consent_uses_no_model(
         ("TOPIC", 1, TOPIC_1),
         ("FOLLOW_UP", 1, FOLLOW_UP_TEMPLATE.format(term="implementation")),
         ("FOLLOW_UP", 1, GENERIC_FOLLOW_UP),
-        ("TOPIC", 2, TOPIC_1.replace("programming fundamentals", "data structures")),
+        ("TOPIC", 2, TECHNICAL_QUESTIONS[Competency.DATA_STRUCTURES]),
         ("TOPIC", 3, "Explain the architecture of TrustLens."),
         ("FOLLOW_UP", 3, FOLLOW_UP_TEMPLATE.format(term="trade-offs")),
         ("TOPIC", 4, "Describe a time you worked in a team. What was your role?"),
@@ -416,6 +415,49 @@ def test_a_withdrawn_project_topic_is_skipped(
         positions.append(q["topic_position"])
         ans(client, started, q["id"], kind="SKIP", said=None)
     assert sorted(set(positions)) == [1, 2, 4, 5]  # TrustLens (3) skipped
+
+
+# ---------- every technical fallback topic is asked (Decision B) ----------
+
+TECHNICAL = {"mode": "TECHNICAL"}
+
+
+def run_interview(client: TestClient, session_id: str, kind: str) -> list[tuple]:
+    """Answers every question with `kind` until the interview ends; returns the TOPIC questions."""
+    topics = []
+    for _ in range(40):
+        q = nxt(client, session_id).json()["question"]
+        if q is None:
+            return topics
+        if q["kind"] == "TOPIC":
+            topics.append((q["topic_position"], q["text"], q["source"], q["rules_reason"]))
+        assert ans(client, session_id, q["id"], kind=kind,
+                   said=ANSWER if kind == "ANSWER" else None).status_code == 200
+    pytest.fail("interview did not end")
+
+
+@pytest.mark.parametrize("kind", ["ANSWER", "SKIP"])
+@pytest.mark.parametrize("consent", ["off", "on, providers failing", "on, no provider"])
+def test_every_technical_topic_is_asked(
+    client: TestClient, sid: str, db_session: Session, use_gateway, consent: str, kind: str
+) -> None:
+    expected_reason = {"off": "NOT_REQUESTED", "on, providers failing": "PROVIDERS_FAILED",
+                       "on, no provider": "NOT_CONFIGURED"}[consent]
+    if consent != "off":
+        consented(client, sid)
+    use_gateway(make_gateway(FakeProvider("groq", ErrorKind.SERVER_ERROR), retries=0)
+                if consent == "on, providers failing" else None)
+    res = client.post(f"/api/interview-sessions/{sid}/plan", json={**SETTINGS, **TECHNICAL})
+    assert res.json()["plan"]["rules_reason"] == expected_reason
+    act(client, sid, "START_INTERVIEW")
+    topics = run_interview(client, sid, kind)
+    assert topics == [(i, TECHNICAL_QUESTIONS[c], "RULES", expected_reason) for i, c in enumerate(
+        (Competency.PROGRAMMING_FUNDAMENTALS, Competency.DATA_STRUCTURES, Competency.DATABASE,
+         Competency.WEB_DEVELOPMENT), 1)]
+    assert state(db_session, sid)[:2] == ("REPORT_GENERATION", "PLAN_COMPLETED")
+    rules = {r[0] for r in db_session.execute(text(
+        "SELECT source FROM interview_questions WHERE session_id = :i"), {"i": sid})}
+    assert rules == {"RULES"}  # deterministic throughout, whatever the consent
 
 
 # ---------- no eligible first topic (Decision A) ----------

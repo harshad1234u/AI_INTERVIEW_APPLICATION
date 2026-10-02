@@ -28,7 +28,7 @@ from app.services.interview_planner import (
     HR_TOPIC,
     MODE_GROUPS,
     PROJECT_QUESTIONS,
-    TECHNICAL_QUESTION,
+    TECHNICAL_QUESTIONS,
     PlanRejected,
     ProjectRequired,
     build_plan,
@@ -199,10 +199,58 @@ def test_fallback_treats_names_differing_only_in_case_spacing_or_end_punctuation
 def test_catalog_wording_takes_no_candidate_text_except_the_cited_project() -> None:
     """Why only AI proposals are checked for uncited projects: fallback text is these constants,
     filled with a label, the role and the one project the topic cites."""
-    texts = (TECHNICAL_QUESTION, *PROJECT_QUESTIONS, *itertools.chain(*BEHAVIORAL_TOPICS),
-             *HR_TOPIC)
+    texts = (*TECHNICAL_QUESTIONS.values(), *PROJECT_QUESTIONS,
+             *itertools.chain(*BEHAVIORAL_TOPICS), *HR_TOPIC)
     fields = {f for text in texts for _, f, _, _ in string.Formatter().parse(text) if f}
-    assert fields == {"area", "project", "role"}
+    assert fields == {"project", "role"}
+
+
+def test_every_technical_area_has_its_own_curated_question() -> None:
+    assert set(TECHNICAL_QUESTIONS) == {c for c, g in GROUP.items() if g == Q.TECHNICAL}
+    plan = fallback_plan(settings(M.TECHNICAL, 15), FACTS, RulesReason.NOT_REQUESTED)
+    assert [(t.topic, t.question_templates) for t in plan.topics] == [
+        (label, [TECHNICAL_QUESTIONS[c]]) for c, label in (
+            (C.PROGRAMMING_FUNDAMENTALS, "Programming Fundamentals"),
+            (C.DATA_STRUCTURES, "Data Structures"), (C.DATABASE, "Database"),
+            (C.WEB_DEVELOPMENT, "Web Development"))]
+    assert all(t.expected_concepts == list(FOCUS[Q.TECHNICAL]) for t in plan.topics)
+
+
+def _catalog(project: str = "TrustLens") -> dict[str, str]:
+    from app.services.interviewer import GENERIC_FOLLOW_UP
+
+    return {**{c.value: q for c, q in TECHNICAL_QUESTIONS.items()},
+            **{f"project {i}": q.format(project=project) for i, q in enumerate(PROJECT_QUESTIONS)},
+            **dict(BEHAVIORAL_TOPICS), "hr": HR_TOPIC[1].format(role="Software Developer Intern"),
+            "generic follow-up": GENERIC_FOLLOW_UP}
+
+
+@pytest.mark.parametrize("project", ["TrustLens", "Campus Connect", "Example", "Core", "Team"])
+def test_no_two_fallback_questions_are_duplicates(project: str) -> None:
+    """Every fallback question can be asked: none is a §33 duplicate of another (Decision B).
+    The rule itself is unchanged; the catalog was reworded."""
+    from app.services.interviewer import DUPLICATE_RATIO, REPHRASE_TEMPLATE, is_duplicate
+
+    assert DUPLICATE_RATIO == 0.85
+    texts = _catalog(project)
+    for (a, x), (b, y) in itertools.combinations(texts.items(), 2):
+        assert not is_duplicate(x, y), (a, b)
+    # A framed rephrase of one topic's question never hides another topic's question either.
+    titles = {c.value: label for c, label in
+              zip(TECHNICAL_QUESTIONS, ("Programming Fundamentals", "Data Structures", "Database",
+                                        "Web Development"))}
+    for (a, x), (b, y) in itertools.permutations(texts.items(), 2):
+        framed = REPHRASE_TEMPLATE.format(topic=titles.get(a, a), question=x)
+        assert not is_duplicate(y, framed), (a, b)
+
+
+def test_data_structures_and_database_are_distinct_but_the_old_frame_was_not() -> None:
+    from app.services.interviewer import is_duplicate
+
+    assert not is_duplicate(TECHNICAL_QUESTIONS[C.DATA_STRUCTURES], TECHNICAL_QUESTIONS[C.DATABASE])
+    # The old shared frame is still caught: the duplicate rule was not weakened.
+    old = "Explain a core concept in {area} and give an example of where it is used."
+    assert is_duplicate(old.format(area="data structures"), old.format(area="database"))
 
 
 def test_ai_proposals_still_may_not_name_an_uncited_project() -> None:

@@ -444,6 +444,16 @@ def test_duplicate_rule() -> None:  # U10
     assert is_duplicate(long_a, long_a + "please")  # long texts too (no autojunk)
 
 
+def test_a_duplicate_plan_question_is_still_skipped() -> None:  # Decision B: rule unchanged
+    old = "Explain a core concept in {area} and give an example of where it is used."
+    plan = RULES_PLAN.model_copy(update={"topics": [
+        TOPICS[0].model_copy(update={"question_templates": [old.format(area="data structures")]}),
+        TOPICS[1].model_copy(update={"question_templates": [old.format(area="database")]}),
+        *TOPICS[2:]]})
+    s = turn(ctx(q(1, 1, answer=A.SKIP, text_=old.format(area="data structures")), plan=plan))
+    assert (s.kind, s.topic_position) == (K.TOPIC, 3)  # topic 2's only template is a duplicate
+
+
 def test_framed_rephrase_fits_the_column() -> None:  # G1
     longest = REPHRASE_TEMPLATE.format(topic="t" * (FACT_MAX_LENGTH + 50),
                                        question="q" * (FACT_MAX_LENGTH + 100))

@@ -95,7 +95,18 @@ CATEGORY_ORDER = (FactCategory.PROJECT, FactCategory.SKILL, FactCategory.EXPERIE
 
 # Deterministic fallback content (PRD §30, §31). Generic questions presume no candidate fact;
 # project questions come from the PRD's own examples (§8, §58) and only name approved projects.
-TECHNICAL_QUESTION = "Explain a core concept in {area} and give an example of where it is used."
+# One curated question per technical area (PRD §32), each about its own concept, so that no two
+# are §33 duplicates of each other: a shared frame made them so, and topics were skipped.
+TECHNICAL_QUESTIONS = {
+    C.PROGRAMMING_FUNDAMENTALS: "How would you explain recursion to someone new to programming, "
+                                "and when would a loop be the better choice?",
+    C.DATA_STRUCTURES: "When would you pick a hash map instead of an array, and what does that "
+                       "choice cost?",
+    C.DATABASE: "Why do databases use indexes, and what is the downside of adding too many of "
+                "them?",
+    C.WEB_DEVELOPMENT: "What happens between typing a web address into a browser and the page "
+                       "appearing on screen?",
+}
 PROJECT_QUESTIONS = ("Explain the architecture of {project}.",
                      "What would you improve in {project}?")
 BEHAVIORAL_TOPICS = (  # one per §42 behavioral focus area
@@ -293,7 +304,7 @@ def fallback_plan(
     queues: dict[QuestionType, list[TopicProposal]] = {
         Q.TECHNICAL: [
             TopicProposal(competency=c, topic=LABELS[c], fact_refs=[],
-                          question_templates=[TECHNICAL_QUESTION.format(area=LABELS[c].lower())],
+                          question_templates=[TECHNICAL_QUESTIONS[c]],
                           expected_concepts=list(FOCUS[Q.TECHNICAL]))
             for c in allowed_competencies(settings, [Q.TECHNICAL])
         ],

@@ -620,7 +620,8 @@ expected_concepts, facts`.
   code; the model's are discarded, so a guess ("their project uses ONNX") can't become an
   expectation. Technical and HR topics keep the model's domain concepts.
 - **RULES plans** use the catalog, the approved projects and generic templates (project questions
-  from PRD §8/§58). `rules_reason`: `NOT_REQUESTED` (no AI consent), `CONSENT_WITHDRAWN`,
+  from PRD §8/§58). Each technical area has its own fixed curated question (PRD §32), worded so
+  that no two fallback questions are PRD §33 duplicates; a test checks every pair. `rules_reason`: `NOT_REQUESTED` (no AI consent), `CONSENT_WITHDRAWN`,
   `NOT_CONFIGURED`, `PROVIDERS_FAILED` or
   `OUTPUT_REJECTED`. A fallback is never silent.
 
