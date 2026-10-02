@@ -10,32 +10,15 @@ import {
   getCandidate,
   updateCandidate,
 } from "@/lib/api";
+import Link from "next/link";
 import ResumeSection from "@/components/ResumeSection";
+import { readStoredId, storeId } from "@/lib/candidateStorage";
 
 type Mode = "loading" | "create" | "view" | "edit";
 type FieldErrors = Partial<Record<keyof CandidateInput, string>>;
 
-// Remembers which profile this browser created. A convenience only — not authentication.
-const STORAGE_KEY = "candidateId";
 const NAME_MAX_LENGTH = 200;
 const EMPTY: CandidateInput = { name: "", email: "" };
-
-function readStoredId(): string | null {
-  try {
-    return localStorage.getItem(STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function storeId(id: string | null): void {
-  try {
-    if (id) localStorage.setItem(STORAGE_KEY, id);
-    else localStorage.removeItem(STORAGE_KEY);
-  } catch {
-    // Storage unavailable (private mode etc.): the profile just won't be remembered.
-  }
-}
 
 export default function CandidateProfile() {
   const [mode, setMode] = useState<Mode>("loading");
@@ -243,7 +226,18 @@ export default function CandidateProfile() {
         )}
       </section>
       {candidate && (mode === "view" || mode === "edit") && (
-        <ResumeSection key={candidate.id} candidateId={candidate.id} />
+        <>
+          <ResumeSection key={candidate.id} candidateId={candidate.id} />
+          <section className="card" aria-labelledby="interview-heading">
+            <h2 id="interview-heading">Practice interview</h2>
+            <p className="hint">
+              Once you have reviewed your resume facts, start or continue a text interview.
+            </p>
+            <Link className="button-link" href="/interview">
+              Go to your interview
+            </Link>
+          </section>
+        </>
       )}
     </>
   );
