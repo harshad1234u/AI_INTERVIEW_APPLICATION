@@ -4,12 +4,14 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 8 (Evaluator) — after an interview finishes, each stored answer can
-be evaluated on request: criterion scores (1–5) backed by exact quotes from the answer with the
-session's AI consent, or deterministic observations without it. Evaluation never changes the
-interview. Finished interviews wait in `REPORT_GENERATION` for the report (Phase 9). Builds on
-the interviewer (Phase 7: code decides every topic, follow-up, rephrase and the finish; a model
-may only word a follow-up or rephrase, with consent), the interview planner (Phase 6), the
+**Current status:** Phase 9 (Report) — once every answer of a finished interview is
+evaluated, `POST .../report` completes the session (`REPORT_GENERATION` → `COMPLETED`) and returns
+a deterministic report built from stored data: no model call, no stored copy, no combined score.
+Builds on the answer evaluator (Phase 8: criterion scores 1–5 backed by exact quotes with the
+session's AI consent, or deterministic observations without it; evaluation never changes the
+interview), the interviewer (Phase 7: code decides every topic, follow-up, rephrase and the
+finish; a model may only word a follow-up or rephrase, with consent), the interview planner
+(Phase 6), the
 interview state machine (Phase 5), the provider-independent model gateway (Phase 4) and resume
 processing with candidate review. Backend only: the interview UI is a later phase.
 
@@ -504,7 +506,7 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
         │ FINISH                                                  END_INTERVIEW │      PAUSE/RESUME
         ↓                                                                       ↓
   REPORT_GENERATION ←──────────────────────────────────────────────────────────┘
-        ↓ (Phase 9)
+        ↓ REPORT_READY (Phase 9: POST .../report)
     COMPLETED  (terminal)
 ```
 
@@ -535,8 +537,9 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
   Sessions finished before Phase 7 keep `NULL`.
 - **Active-time clock** (database time): `START_INTERVIEW` and `RESUME` start it; `PAUSE` and every
   move into `REPORT_GENERATION` add the running time to `active_seconds` and stop it.
-- Through the API a session now runs from `READY` to `REPORT_GENERATION` (see
-  [Interviewer](#interviewer)); `COMPLETED` needs Phase 9's `REPORT_READY`.
+- Through the API a session runs from `READY` to `REPORT_GENERATION` (see
+  [Interviewer](#interviewer)), and `POST .../report` applies `REPORT_READY` → `COMPLETED` (see
+  [Interview Report](#interview-report)).
 
 ### API
 
@@ -781,7 +784,7 @@ consent.
   interview.
 - **Finish reasons:** `PLAN_COMPLETED`, `TIME_LIMIT`, `CANDIDATE_ENDED`, `NO_ELIGIBLE_TOPIC`
   (no topic could be asked at all; see Decisions). The session stays in
-  `REPORT_GENERATION` until Phase 9; nothing reports a report as ready.
+  `REPORT_GENERATION` until the report is requested (see [Interview Report](#interview-report)).
 - **Late answers:** once the limit is reached the answer is refused with
   `409 {"detail": "The interview time limit was reached, so this answer was not saved."}` and is
   not stored or logged; earlier answers are kept. A retry of an answer saved before the limit is
@@ -936,6 +939,96 @@ Evaluation quality with live models is unverified (no live test was run). Correc
 assessed. The wording rules are English-only. A model that normalizes whitespace inside a quote
 is rejected, so the answer falls back to observations. Disputes (PRD §39), learning mode, speech
 metrics and the report are not part of Phase 8.
+
+## Interview Report
+
+> The full specification is [docs/phase-9-report-plan.md](docs/phase-9-report-plan.md).
+
+The report is a **deterministic view of stored data**:
+- **Inputs:** the session's plan snapshot, questions, answers and evaluations.
+- **No model:** no model is called and no AI capability, prompt or provider is involved, so AI
+  consent and provider availability don't matter.
+- **Nothing stored:** there is no report table, version, snapshot or history. Every read
+  rebuilds the report, so the same rows always give the same report (identical content and key
+  order).
+
+### Completing the interview
+
+```text
+POST .../report
+time limit applied first (as on every interview write) · lock the session row
+   unfinished (not REPORT_GENERATION / COMPLETED)          → 409
+   COMPLETED                                               → 200, the same report, no transition
+   any ANSWER still NOT_EVALUATED                          → 409 naming the count, nothing written
+   otherwise: build the report, apply REPORT_READY → COMPLETED, commit (one transaction)
+```
+
+- **Evaluate first:** call `POST .../questions/{qid}/evaluation` for each `ANSWER` before
+  requesting the report. Without consent or a model that is instant and deterministic, so a
+  finished interview can always complete. The report never runs an evaluation itself.
+- **Not a prerequisite:** `SKIP`, `DONT_KNOW` and `CLARIFY` answers don't need an evaluation:
+  they are not applicable by their kind (Phase 8 E7). Their stored status is not changed.
+- **Consent:** grant AI consent **before** requesting the report if you want AI evaluations.
+  Consent can't be granted once the session is `COMPLETED`. An answer that only has observations
+  can still get its one re-evaluation after `COMPLETED` if consent was already granted, and the
+  next read of the report shows it.
+- **Next session:** `COMPLETED` frees the candidate's one unfinished-session slot.
+- **`REPORT_READY`:** it stays a system event; `/actions` rejects it (`422`).
+
+### Contents
+
+| Field | Built from |
+|---|---|
+| `summary` | Plan settings and source; `finish_reason` as stored, with fixed text; `active_seconds`; counts of questions, answer kinds, unanswered questions and evaluation statuses. No finish timestamp is stored, so none is shown. |
+| `questions` | Every asked question in order, with a neutral note: "Answered", "Skipped", "Answered: I don't know", "Asked for clarification", "Not answered: the interview ended first." Answer text is not repeated: `GET .../questions` has it. |
+| `coverage` | Per planned topic: questions asked, or "Not asked in this interview." (why is not stored). Per competency: planned and asked topics (plain counts). |
+| `shown_clearly` | Every criterion of an AI-evaluated answer scored **4** ("mostly") or **5** ("clearly and fully"), with its evidence quotes |
+| `to_practise` | Every criterion scored **1** ("not shown") or **2** ("slightly"), and every missing planned concept, each with a fixed practice sentence. Score **3** and `null` are in neither list. |
+| `answer_evidence` | The stored evaluation of each evaluated `ANSWER`, exactly as `GET .../evaluations` returns it, with the provider-failure notice where it applies |
+| `communication_observations` | The stored `word_count` and planned concepts mentioned per answer. `speech_metrics` is `{available: false}`: answers are text only. |
+| `topics_to_practise` | Topics with at least one `to_practise` item, listing those criteria and concepts |
+| `recommended_practice` | One fixed sentence per distinct item, with the ids of the answers it comes from |
+| `retry` | `{available: false}`: there is no retry feature yet |
+| `score_scale`, `limitations` | The evaluator's 1–5 anchors, and a fixed notice |
+
+### Rules
+
+- **No combined score.** Nothing is summed, averaged, weighted, totalled, turned into a
+  percentage, ranked or turned into a verdict. A score always belongs to one criterion of one
+  answer.
+- **Never penalized:** observation-only answers, `SKIP`, `DONT_KNOW`, `CLARIFY` and unanswered
+  questions never produce a "shown clearly" or "to practise" item.
+- **Correctness:** none is assessed. Claims stay "Needs verification".
+- **Fixed wording:** every sentence is fixed text chosen by code. Stored text (question text,
+  quotes, planned concepts, feedback) is placed into fields as data and never interpreted.
+- **No judgments:** no hiring, ranking, suitability, personality or confidence statements. The
+  fixed sentences are tested against the evaluator's wording rules. The limitations notice is the
+  one exception: it names what the report is not.
+
+### API
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `POST /api/interview-sessions/{id}/report` `{}` | `200 {session_id, status: "COMPLETED", report}` (first call completes the session; repeats return the same report) | `404` · `409` `"The report is available after the interview has finished."` · `409` `"Evaluate every answer before requesting the report: {n} not evaluated yet."` · `422` any body field · `503` |
+| `GET /api/interview-sessions/{id}/report` | `200 {session_id, status, report}` | `404` · `409` `"The report has not been generated yet."` (not `COMPLETED`) |
+
+Not served when `ENVIRONMENT=production`. There is no authentication yet (see
+[Access boundary](#access-boundary-no-authentication-yet)).
+
+### Privacy and concurrency
+
+- **Privacy:** nothing new is stored, so deleting the session or candidate removes everything
+  the report is built from. Logs hold the session id and question count only.
+- **Concurrency:** concurrent `POST`s serialize on the session row lock. One applies
+  `REPORT_READY`, and the other returns the same report. A `POST` while an evaluation is still
+  inside its model call gets `409` until that evaluation is stored. No lock is held across any
+  external call (there is none).
+
+### Limitations
+
+- No speech metrics, retry, progress tracking or candidate goals: those features don't exist yet.
+- Why a planned topic was not asked is not stored, so it isn't shown.
+- No PDF and no AI coach narrative.
 
 ## Environment variables
 

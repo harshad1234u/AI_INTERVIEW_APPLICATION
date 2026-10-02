@@ -1,6 +1,6 @@
 # Phase 9 — Report Generation: Final Plan (revision 2)
 
-Status: **approved (2026-10-02).**
+Status: **approved (2026-10-02); implemented as specified (§9 lists the implementation notes).**
 - R1–R18 were approved as recommended.
 - C-R1–C-R9 are resolved as recommended.
 - Revision 1 (`1c4bb06`) was the draft. This revision changes only what §0 lists.
@@ -307,3 +307,33 @@ The interviewer never reads the report (it reads nothing new).
 
 `test_interview_turn_api.py` twice took about 6–10 minutes instead of about 25 s (Phase 8 §6). It
 is not reproducible and not fixed.
+
+## 9. Implementation notes (2026-10-02)
+
+Implemented as specified in §0–§7. Commits, after this plan (`d81934c`):
+
+| Commit | Content |
+|---|---|
+| `d5878cc` | The evaluation view moved, unchanged, from the routes into `services/evaluator.py`, so the report reuses it |
+| `dd7519b` | `services/report.py`, `schemas/report.py`, `POST`/`GET .../report` |
+| `5d49238` | `tests/test_report.py` (80 tests) |
+| (docs commit) | README and this section |
+
+Details the plan left to implementation:
+- **No migration:** the Alembic head stays `3a4785ecf08e`. No table or column holds report data.
+- **Status of non-`ANSWER` kinds:** the report shows them as `NOT_APPLICABLE` by kind, and their
+  stored status is left as it is (the report never writes evaluation data).
+- **`not_evaluated` count:** non-zero only for a session completed some other way, with an
+  `ANSWER` left unevaluated. Such a session can't be produced through the API; the report still
+  shows it honestly.
+- **Ordering:**
+  - questions by `seq`;
+  - criteria in rubric order;
+  - missing concepts as stored;
+  - topics by plan position;
+  - competencies by first appearance in the plan;
+  - recommended practice in first-seen order (criteria before concepts within an answer).
+- **`active_seconds`:** shown as a whole number (floor) of the stored value, which no longer
+  changes once the interview finished.
+- **Atomicity:** the report is built before `REPORT_READY` in the same transaction. A build
+  failure or a failed commit leaves the session in `REPORT_GENERATION` (tested).
