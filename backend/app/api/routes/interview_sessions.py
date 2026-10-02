@@ -9,13 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.ai.evaluator_agent import propose_evaluation
 from app.ai.gateway import CallRecord, ModelGateway
 from app.ai.interviewer_agent import WordingRequest, propose_wording
 from app.ai.planner_agent import PlannerOutcome, propose_plan
 from app.ai.providers import get_model_gateway
 from app.api.routes.candidates import get_candidate
 from app.db.session import get_db
-from app.models import Candidate, InterviewQuestion, InterviewSession
+from app.models import AnswerEvaluation, Candidate, InterviewQuestion, InterviewSession
 from app.models.interview_question import ANSWER_MAX_LENGTH, AnswerKind
 from app.schemas.interview_plan import (
     InterviewPlan,
@@ -24,6 +25,16 @@ from app.schemas.interview_plan import (
     ModelCallSummary,
     PlanSettings,
     RulesReason,
+)
+from app.schemas.evaluation import (
+    AnswerEvaluationItem,
+    ClaimView,
+    CriterionView,
+    EvaluationList,
+    EvaluationRequest,
+    EvaluationResult,
+    EvaluationView,
+    Observations,
 )
 from app.schemas.interview_session import (
     InterviewSessionCreate,
@@ -52,6 +63,15 @@ from app.services.interview_planner import (
     fallback_plan,
     prepare_planning,
     save_plan,
+)
+from app.services.evaluator import (
+    PROVIDERS_DOWN,
+    RUBRICS,
+    EvaluationNotAllowed,
+    PendingEvaluation,
+    prepare_evaluation,
+    save_evaluation,
+    session_evaluations,
 )
 from app.services.interviewer import (
     ConsentNotAllowed,
@@ -295,11 +315,13 @@ def get_ai_consent(
 ANSWER_TOO_LONG = f"Answer is too long: the limit is {ANSWER_MAX_LENGTH:,} characters."
 
 
-def _question_view(plan: InterviewPlan, q: InterviewQuestion) -> QuestionView:
+def _question_view(plan: InterviewPlan, q: InterviewQuestion,
+                   evaluation: AnswerEvaluation | None = None) -> QuestionView:
     topic = plan.topics[q.topic_position - 1]
     answer = None if q.answered_at is None else AnswerView(
         kind=q.answer_kind, text=q.answer_text, answered_at=q.answered_at,
-        evaluation=Evaluation(status=q.evaluation_status))
+        evaluation=Evaluation(status=q.evaluation_status,
+                              detail=_evaluation_view(plan, q, evaluation)))
     return QuestionView(
         id=q.id, seq=q.seq, topic_position=q.topic_position, topic=topic.topic,
         competency=topic.competency, question_type=topic.question_type,
@@ -389,7 +411,86 @@ def read_questions(
         return QuestionHistory(session_id=session.id, status=session.status,
                                finish_reason=session.finish_reason, progress=None, questions=[])
     plan = stored_plan(session)
+    evaluations = session_evaluations(db, session.id)
     return QuestionHistory(
         session_id=session.id, status=session.status, finish_reason=session.finish_reason,
         progress=_progress(plan, elapsed_seconds(db, session)),
-        questions=[_question_view(plan, q) for q in load_history(db, session.id)])
+        questions=[_question_view(plan, q, evaluations.get(q.id))
+                   for q in load_history(db, session.id)])
+
+
+# ---------- answer evaluation (Phase 8) ----------
+
+
+def _evaluation_view(plan: InterviewPlan, q: InterviewQuestion,
+                     row: AnswerEvaluation | None) -> EvaluationView | None:
+    if row is None:
+        return None
+    order = RUBRICS[row.rubric]
+    return EvaluationView(
+        rubric=row.rubric, rubric_version=row.rubric_version, source=row.source,
+        rules_reason=row.rules_reason,
+        criteria=[CriterionView(criterion=c.criterion, score=c.score, evidence=c.evidence)
+                  for c in sorted(row.criteria, key=lambda c: order.index(c.criterion))],
+        missing_concepts=row.missing_concepts,
+        claims_to_verify=[ClaimView(quote=quote) for quote in row.claims_to_verify],
+        feedback=row.feedback,
+        observations=Observations(
+            word_count=row.word_count,
+            planned_concepts=plan.topics[q.topic_position - 1].expected_concepts,
+            concepts_mentioned=row.concepts_mentioned),
+        created_at=row.created_at, updated_at=row.updated_at)
+
+
+@router.post("/interview-sessions/{session_id}/questions/{question_id}/evaluation",
+             response_model=EvaluationResult)
+def evaluate_answer(
+    session_id: uuid.UUID,
+    question_id: uuid.UUID,
+    body: EvaluationRequest,
+    db: Session = Depends(get_db),
+    gateway: ModelGateway | None = Depends(get_model_gateway),
+) -> EvaluationResult:
+    """Evaluate one stored answer, once the interview has finished. Code decides the rubric and
+    whether a model may be asked (the session's AI consent); a stored result is returned again
+    with no model call. The evaluation never changes the interview."""
+    try:
+        result = prepare_evaluation(db, session_id, question_id,
+                                    model_available=gateway is not None)
+        if isinstance(result, PendingEvaluation):
+            # No DB connection or lock is held from here until save_evaluation.
+            outcome = anyio.from_thread.run(propose_evaluation, gateway, result.context,
+                                            result.codes, result.deadline)
+            result = save_evaluation(db, result, outcome)
+    except SessionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
+    except QuestionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Question not found") from None
+    except EvaluationNotAllowed as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    _commit(db)
+    row = result.evaluation
+    return EvaluationResult(
+        session_id=result.session.id, question_id=result.question.id,
+        status=result.question.evaluation_status,
+        evaluation=_evaluation_view(result.plan, result.question, row),
+        notice=PROVIDERS_DOWN if row and row.rules_reason == RulesReason.PROVIDERS_FAILED else None,
+        model_calls=_call_summaries(result.records))
+
+
+@router.get("/interview-sessions/{session_id}/evaluations", response_model=EvaluationList)
+def read_evaluations(
+    session: InterviewSession = Depends(get_interview_session), db: Session = Depends(get_db)
+) -> EvaluationList:
+    """The evaluation status of every answered question, with the stored evaluation if any."""
+    if session.plan is None:
+        return EvaluationList(session_id=session.id, status=session.status, evaluations=[])
+    plan = stored_plan(session)
+    evaluations = session_evaluations(db, session.id)
+    return EvaluationList(session_id=session.id, status=session.status, evaluations=[
+        AnswerEvaluationItem(question_id=q.id, seq=q.seq, status=q.evaluation_status,
+                             evaluation=_evaluation_view(plan, q, evaluations.get(q.id)))
+        for q in load_history(db, session.id) if q.answered_at is not None])

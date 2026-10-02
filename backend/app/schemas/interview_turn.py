@@ -3,9 +3,16 @@ shapes a model may return for question wording."""
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, StrictBool, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    StringConstraints,
+    model_serializer,
+)
 
 from app.models.interview_question import (
     QUESTION_MAX_LENGTH,
@@ -15,6 +22,7 @@ from app.models.interview_question import (
     QuestionSource,
 )
 from app.models.interview_session import FinishReason, InterviewStatus, RulesReason
+from app.schemas.evaluation import EvaluationView
 from app.schemas.interview_plan import (
     Competency,
     Difficulty,
@@ -95,7 +103,17 @@ class AnswerRequest(BaseModel):
 
 
 class Evaluation(BaseModel):
-    status: EvaluationStatus  # NOT_EVALUATED: stored, not evaluated (Phase 8 evaluates)
+    status: EvaluationStatus  # NOT_EVALUATED until evaluated after the finish (Phase 8)
+    # Present only once an evaluation is stored (plan E11); until then the object is exactly
+    # {"status": ...}, as in Phase 7.
+    detail: EvaluationView | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_detail(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if data.get("detail") is None:
+            data.pop("detail", None)
+        return data
 
 
 class AnswerView(BaseModel):
