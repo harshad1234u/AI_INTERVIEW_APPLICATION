@@ -18,6 +18,7 @@ from app.api.routes.candidates import get_candidate
 from app.db.session import get_db
 from app.models import AnswerEvaluation, Candidate, InterviewQuestion, InterviewSession
 from app.models.interview_question import ANSWER_MAX_LENGTH, AnswerKind
+from app.models.interview_session import InterviewStatus
 from app.schemas.interview_plan import (
     InterviewPlan,
     InterviewPlanResult,
@@ -51,6 +52,7 @@ from app.schemas.interview_turn import (
     QuestionView,
     TurnResult,
 )
+from app.schemas.report import ReportRequest, ReportResult
 from app.services.interview_planner import (
     PlanningNotAllowed,
     PlanRejected,
@@ -69,6 +71,7 @@ from app.services.evaluator import (
     save_evaluation,
     session_evaluations,
 )
+from app.services.report import NOT_GENERATED, ReportNotAllowed, complete_report, session_report
 from app.services.interviewer import (
     ConsentNotAllowed,
     LateAnswer,
@@ -471,3 +474,38 @@ def read_evaluations(
                              evaluation=evaluation_view(plan, q, evaluations.get(q.id)))
         for q in load_history(db, session.id) if q.answered_at is not None])
 
+
+# ---------- report (Phase 9) ----------
+
+
+@router.post("/interview-sessions/{session_id}/report", response_model=ReportResult)
+def generate_report(
+    session_id: uuid.UUID, body: ReportRequest, db: Session = Depends(get_db)
+) -> ReportResult:
+    """REPORT_GENERATION -> COMPLETED once every answer has been evaluated, and the report. Built
+    by code from stored data: no model call and nothing stored. A completed session returns the
+    same report again."""
+    try:
+        # Every interview write first applies the time limit (Phase 7, §6.3).
+        if lock_and_enforce_deadline(db, session_id):
+            _commit(db)
+        session, report = complete_report(db, session_id)
+    except SessionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
+    except ReportNotAllowed as exc:
+        db.rollback()  # nothing was written; this releases the row lock
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    _commit(db)
+    return ReportResult(session_id=session.id, status=session.status, report=report)
+
+
+@router.get("/interview-sessions/{session_id}/report", response_model=ReportResult)
+def read_report(
+    session: InterviewSession = Depends(get_interview_session), db: Session = Depends(get_db)
+) -> ReportResult:
+    """The report of a completed interview, rebuilt from stored data. Reading changes nothing."""
+    if session.status != InterviewStatus.COMPLETED:
+        raise HTTPException(status.HTTP_409_CONFLICT, NOT_GENERATED)  # D11
+    return ReportResult(session_id=session.id, status=session.status,
+                        report=session_report(db, session))
