@@ -406,6 +406,17 @@ def technical_terms(question: str) -> list[str]:
     return terms
 
 
+def ungrounded_claim(text: str, topic: PlannedTopic) -> bool:
+    """P1: text that presumes something about the candidate (names a cited fact, or a PRESUMES
+    pattern) may only name technical terms found in the approved cited facts or the validated plan
+    topic. Answer text is never grounding."""
+    cited = [f.fact for f in topic.facts]
+    if not (any(mentions(text, f) for f in cited) or PRESUMES.search(text)):
+        return False
+    grounded = [*cited, topic.topic, *topic.question_templates, *topic.expected_concepts]
+    return any(not any(find_phrase(g, term) for g in grounded) for term in technical_terms(text))
+
+
 def _content_codes(ctx: TurnContext, question: str, anchor: str | None) -> set[str]:
     """Rules for any model-written question."""
     topic = ctx.topic(ctx.last.topic_position)
@@ -424,13 +435,8 @@ def _content_codes(ctx: TurnContext, question: str, anchor: str | None) -> set[s
                 if f.category == FactCategory.PROJECT} - set(cited)
     if any(mentions(own, p) for p in projects):
         codes.add("uncited_project")
-    # P1: a presumption may only rest on approved cited facts and the validated plan topic.
-    # Answer text is never grounding.
-    if any(mentions(question, f) for f in cited) or PRESUMES.search(question):
-        grounded = [*cited, topic.topic, *topic.question_templates, *topic.expected_concepts]
-        if any(not any(find_phrase(g, term) for g in grounded)
-               for term in technical_terms(question)):
-            codes.add("ungrounded_claim")
+    if ungrounded_claim(question, topic):
+        codes.add("ungrounded_claim")
     if REFERENCE.search(question) and not (anchor and find_phrase(question, anchor)):
         codes.add("unanchored_reference")
     return codes
