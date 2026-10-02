@@ -28,13 +28,9 @@ from app.schemas.interview_plan import (
 )
 from app.schemas.evaluation import (
     AnswerEvaluationItem,
-    ClaimView,
-    CriterionView,
     EvaluationList,
     EvaluationRequest,
     EvaluationResult,
-    EvaluationView,
-    Observations,
 )
 from app.schemas.interview_session import (
     InterviewSessionCreate,
@@ -66,9 +62,9 @@ from app.services.interview_planner import (
 )
 from app.services.evaluator import (
     PROVIDERS_DOWN,
-    RUBRICS,
     EvaluationNotAllowed,
     PendingEvaluation,
+    evaluation_view,
     prepare_evaluation,
     save_evaluation,
     session_evaluations,
@@ -321,7 +317,7 @@ def _question_view(plan: InterviewPlan, q: InterviewQuestion,
     answer = None if q.answered_at is None else AnswerView(
         kind=q.answer_kind, text=q.answer_text, answered_at=q.answered_at,
         evaluation=Evaluation(status=q.evaluation_status,
-                              detail=_evaluation_view(plan, q, evaluation)))
+                              detail=evaluation_view(plan, q, evaluation)))
     return QuestionView(
         id=q.id, seq=q.seq, topic_position=q.topic_position, topic=topic.topic,
         competency=topic.competency, question_type=topic.question_type,
@@ -422,26 +418,6 @@ def read_questions(
 # ---------- answer evaluation (Phase 8) ----------
 
 
-def _evaluation_view(plan: InterviewPlan, q: InterviewQuestion,
-                     row: AnswerEvaluation | None) -> EvaluationView | None:
-    if row is None:
-        return None
-    order = RUBRICS[row.rubric]
-    return EvaluationView(
-        rubric=row.rubric, rubric_version=row.rubric_version, source=row.source,
-        rules_reason=row.rules_reason,
-        criteria=[CriterionView(criterion=c.criterion, score=c.score, evidence=c.evidence)
-                  for c in sorted(row.criteria, key=lambda c: order.index(c.criterion))],
-        missing_concepts=row.missing_concepts,
-        claims_to_verify=[ClaimView(quote=quote) for quote in row.claims_to_verify],
-        feedback=row.feedback,
-        observations=Observations(
-            word_count=row.word_count,
-            planned_concepts=plan.topics[q.topic_position - 1].expected_concepts,
-            concepts_mentioned=row.concepts_mentioned),
-        created_at=row.created_at, updated_at=row.updated_at)
-
-
 @router.post("/interview-sessions/{session_id}/questions/{question_id}/evaluation",
              response_model=EvaluationResult)
 def evaluate_answer(
@@ -476,7 +452,7 @@ def evaluate_answer(
     return EvaluationResult(
         session_id=result.session.id, question_id=result.question.id,
         status=result.question.evaluation_status,
-        evaluation=_evaluation_view(result.plan, result.question, row),
+        evaluation=evaluation_view(result.plan, result.question, row),
         notice=PROVIDERS_DOWN if row and row.rules_reason == RulesReason.PROVIDERS_FAILED else None,
         model_calls=_call_summaries(result.records))
 
@@ -492,5 +468,6 @@ def read_evaluations(
     evaluations = session_evaluations(db, session.id)
     return EvaluationList(session_id=session.id, status=session.status, evaluations=[
         AnswerEvaluationItem(question_id=q.id, seq=q.seq, status=q.evaluation_status,
-                             evaluation=_evaluation_view(plan, q, evaluations.get(q.id)))
+                             evaluation=evaluation_view(plan, q, evaluations.get(q.id)))
         for q in load_history(db, session.id) if q.answered_at is not None])
+

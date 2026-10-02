@@ -29,7 +29,13 @@ from app.models import InterviewSession, ProviderCall
 from app.models.answer_evaluation import Criterion, Rubric
 from app.models.interview_question import AnswerKind, EvaluationStatus, QuestionSource
 from app.models.interview_session import RulesReason
-from app.schemas.evaluation import EvaluationProposal
+from app.schemas.evaluation import (
+    ClaimView,
+    CriterionView,
+    EvaluationProposal,
+    EvaluationView,
+    Observations,
+)
 from app.schemas.interview_plan import InterviewPlan, PlannedTopic, QuestionType
 from app.services.interview_planner import SENSITIVE, own_words
 from app.services.interviewer import (
@@ -309,3 +315,24 @@ def _store(db: Session, question: InterviewQuestion, ctx: EvaluationContext, att
     logger.info("Answer %s evaluated: %s, attempt %d%s", question.id, question.evaluation_status,
                 attempt, f", {row.rules_reason}" if row.rules_reason else "")
     return row
+
+
+def evaluation_view(plan: InterviewPlan, q: InterviewQuestion,
+                    row: AnswerEvaluation | None) -> EvaluationView | None:
+    """The API view of a stored evaluation, criteria in rubric order (also used by the report)."""
+    if row is None:
+        return None
+    order = RUBRICS[row.rubric]
+    return EvaluationView(
+        rubric=row.rubric, rubric_version=row.rubric_version, source=row.source,
+        rules_reason=row.rules_reason,
+        criteria=[CriterionView(criterion=c.criterion, score=c.score, evidence=c.evidence)
+                  for c in sorted(row.criteria, key=lambda c: order.index(c.criterion))],
+        missing_concepts=row.missing_concepts,
+        claims_to_verify=[ClaimView(quote=quote) for quote in row.claims_to_verify],
+        feedback=row.feedback,
+        observations=Observations(
+            word_count=row.word_count,
+            planned_concepts=plan.topics[q.topic_position - 1].expected_concepts,
+            concepts_mentioned=row.concepts_mentioned),
+        created_at=row.created_at, updated_at=row.updated_at)
