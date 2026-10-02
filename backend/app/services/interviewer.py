@@ -377,9 +377,19 @@ EVALUATIVE = re.compile(r"\b(?:right|wrong|correct|incorrect|incomplete|you miss
                         r"good answer|not quite)\b", re.IGNORECASE)
 HIRING = re.compile(r"\b(?:hire|hired|hiring|unsuitable|rank|ranking|employable)\b", re.IGNORECASE)
 REFERENCE = re.compile(r"\byou\s+(?:mentioned|said|told|described)\b", re.IGNORECASE)
-# Presumes something about the candidate: "you used/built/...", "did/have you ...", "your ...".
+# What a candidate can own or use: "your" before one of these (up to two words in between, as in
+# "your Kafka setup") presumes it; "your own words", "your opinion", "your answer" do not.
+# ponytail: a closed English word list, so an unlisted noun ("your Kafka broker") slips through;
+# extend the list if live output shows such misses (L1).
+OWNED = ("project|projects|app|apps|application|applications|system|systems|code|codebase|"
+         "implementation|deployment|setup|stack|design|architecture|solution|service|services|"
+         "pipeline|model|models|team|internship|job|work|experience|role|use|usage|choice|choices|"
+         "decision|decisions|repo|repository|database|server|backend|frontend|api|product|"
+         "version|configuration|config|cluster")
+# Presumes something about the candidate: "you used/built/...", "did/have you ...", "your <owned>".
 PRESUMES = re.compile(r"\b(?:you(?:'ve|\s+have|\s+had)?\s+(?:used|built|implemented|chose|"
-                      r"designed|worked\s+on)|(?:did|have|had)\s+you|your)\b", re.IGNORECASE)
+                      r"designed|worked\s+on)|(?:did|have|had)\s+you|"
+                      rf"your\s+(?:[\w.+#-]+\s+){{0,2}}?(?:{OWNED}))\b", re.IGNORECASE)
 WORD_EDGES = "\"'()[]{},;:!?"
 
 

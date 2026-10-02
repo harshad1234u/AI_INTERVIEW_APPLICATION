@@ -375,7 +375,7 @@ Deterministic rules (codes only, never content):
 | `anchor_not_mentioned` | The question names the anchor |
 | `unanchored_reference` | "you mentioned/said/told/described" without an anchor |
 | `uncited_project` | The model's own words name a plan project the topic doesn't cite |
-| `ungrounded_claim` | **(P1)** A question that presumes something about the candidate (it names a cited fact, or uses a "you used/built/implemented/chose/designed/worked on" pattern) contains a technology or project name, or another technical-looking term (capitalized mid-sentence, or containing a digit, `+`, `#` or `.`), found nowhere in the **still-approved cited facts or the validated plan topic** (title, templates, expected concepts). Answer text is **not** grounding: a name that appears only in an answer is not evidence that the candidate used or built it. |
+| `ungrounded_claim` | **(P1)** A question that presumes something about the candidate (it names a cited fact, or uses a "you used/built/implemented/chose/designed/worked on" pattern; extended in §17 D) contains a technology or project name, or another technical-looking term (capitalized mid-sentence, or containing a digit, `+`, `#` or `.`), found nowhere in the **still-approved cited facts or the validated plan topic** (title, templates, expected concepts). Answer text is **not** grounding: a name that appears only in an answer is not evidence that the candidate used or built it. |
 | `term_already_used` | **(P2, I2)** The anchor's normalized form is already in the session's used-term set (§8.1 step 3) |
 | `rephrase_substitutes_planned_question` | **(P3, I3)** A rephrase matches (§33 rule) one of the plan's other question templates. Handled as a duplicate (§8.4). |
 | `evaluative_language` | Right/wrong/correct/incorrect/incomplete/"you missed"/"you forgot"/"good answer"/"not quite" (D1) |
@@ -853,3 +853,34 @@ Approved after the Phase 7 commits (`97c0849`..`d0ad69d`). They supersede the se
   - 639 and 640 are accepted and 641 rejected, by the column and by the schema;
   - the 604-character rephrase is stored and read back through the API without truncation.
 - Answers stay at exactly 10,000.
+
+### D. Presumption detection for `ungrounded_claim` (G4)
+
+- The verb list alone missed the R2 cases ("How did you deploy ChatBotX?"), so the detector also
+  matches "did/have/had you" (kept as implemented).
+- "your" is now narrowed: it counts only before something a candidate owns or uses, from a closed
+  word list (project, app, system, code, setup, stack, architecture, experience, use, decision, …),
+  with up to two words in between ("your Kafka setup").
+  - "In your own words", "your opinion", "your view", "your answer" and "your approach" presume
+    nothing.
+  - A presumption grounded in a cited fact ("your TrustLens architecture") is still allowed.
+- The check is deterministic, never a model judgement. It only triggers the grounding check:
+  rejection still needs a technical term that is not in the approved cited facts or the plan topic.
+- Tests: the R2 and "your <owned>" cases are rejected, and eight false-positive phrasings are
+  allowed.
+- Limitation (L1): an owned noun outside the list ("your Kafka broker") is not seen as a
+  presumption.
+
+### E. Metadata of topic questions (G3)
+
+- Kept as implemented. A TOPIC question's text is the plan's, so:
+  - it carries the plan's `source`;
+  - for a RULES plan it carries the plan's real `rules_reason` (why the plan is deterministic);
+  - an AI plan's topic question is `AI` with no reason, no anchor and no interviewer call link (its
+    model call was the planner's).
+- No placeholder reason exists. The turn's consent or provider state never relabels a topic
+  question.
+- Tests:
+  - every `RulesReason` × turn reason gives the plan's reason, identically on repeat;
+  - an AI plan's first topic question makes no call;
+  - consent granted after planning leaves `NOT_REQUESTED`.

@@ -1077,3 +1077,36 @@ def test_the_longest_rephrase_is_stored_and_read_back_whole(
                                {"i": r["id"]})
     history = client.get(f"/api/interview-sessions/{sid}/questions").json()["questions"]
     assert stored == history[1]["text"] == framed  # no truncation anywhere
+
+
+# ---------- topic question metadata (item 6) ----------
+
+
+def test_topic_questions_carry_the_plans_provenance(
+    client: TestClient, sid: str, db_session: Session, use_gateway
+) -> None:
+    from tests.test_interview_plan_api import VALID
+
+    consented(client, sid)
+    provider = FakeProvider("groq", VALID)
+    use_gateway(make_gateway(provider))
+    assert client.post(f"/api/interview-sessions/{sid}/plan", json=SETTINGS).json()[
+        "plan"]["source"] == "AI"
+    act(client, sid, "START_INTERVIEW")
+    res = nxt(client, sid).json()
+    q = res["question"]
+    assert (q["kind"], q["text"], q["source"], q["rules_reason"], res["model_calls"]) == (
+        "TOPIC", "How do you manage state in React?", "AI", None, [])  # written at planning
+    assert len(provider.calls) == 1  # the planner's call only: a topic question needs none
+    row = db_session.execute(text("SELECT anchor, provider_call_id FROM interview_questions "
+                                  "WHERE id = :i"), {"i": q["id"]}).one()
+    assert tuple(row) == (None, None)  # not linked to any interviewer call
+
+
+def test_consent_granted_after_planning_does_not_relabel_topic_questions(
+    client: TestClient, started: str, use_gateway
+) -> None:
+    consented(client, started)
+    use_gateway(make_gateway(FakeProvider("groq", {"question": "unused?", "anchor": "unused"})))
+    q = first_question(client, started)
+    assert (q["kind"], q["source"], q["rules_reason"]) == ("TOPIC", "RULES", "NOT_REQUESTED")

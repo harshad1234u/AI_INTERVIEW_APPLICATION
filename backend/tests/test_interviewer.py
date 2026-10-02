@@ -260,6 +260,21 @@ def test_first_question_is_the_first_topics_template_verbatim() -> None:  # U1, 
     assert (s.source, s.rules_reason) == (QuestionSource.AI, None)
 
 
+@pytest.mark.parametrize("plan_reason", list(RulesReason))
+@pytest.mark.parametrize("turn_reason", [RulesReason.NOT_REQUESTED, RulesReason.NOT_CONFIGURED,
+                                         RulesReason.CONSENT_WITHDRAWN])
+def test_topic_metadata_is_the_plans_whatever_the_turn(  # item 6
+    plan_reason: RulesReason, turn_reason: RulesReason
+) -> None:
+    """A topic question's text is the plan's, so it carries why the plan is deterministic, never
+    the turn's consent or provider state, and never an AI provenance it doesn't have."""
+    plan = RULES_PLAN.model_copy(update={"rules_reason": plan_reason})
+    c = ctx(q(1, 1, answer=A.SKIP), plan=plan)
+    steps = {resolve(c, decide(c), reason=turn_reason) for _ in range(3)}
+    assert {(s.kind, s.source, s.rules_reason, s.anchor) for s in steps} == {
+        (K.TOPIC, QuestionSource.RULES, plan_reason, None)}
+
+
 def test_clarify_twice_rephrases_then_the_third_moves_on() -> None:  # U2, R8(c), R9, L12
     first = q(1, 1, answer=A.CLARIFY)
     s = turn(ctx(first))
@@ -550,6 +565,33 @@ def test_valid_follow_up_wording_passes() -> None:  # R3
 def test_follow_up_rules(question: str, anchor: str, code: str | None) -> None:
     codes = fu(question, anchor)
     assert code in codes if code else "unanchored_reference" not in codes
+
+
+@pytest.mark.parametrize("question", [
+    "How did you deploy ChatBotX with trade-offs in mind?",  # R2: "did you"
+    "You mentioned trade-offs. Why did you choose Kafka for TrustLens?",  # R2
+    "Which trade-offs have you made with Kafka?",
+    "What was your Kafka setup like, given the trade-offs?",  # "your" + owned thing
+    "How did your TrustLens backend handle ONNX trade-offs?",
+    "In your experience with Kafka, which trade-offs matter?",
+    "Which trade-offs shaped your use of Redis?",
+])
+def test_presumptions_must_rest_on_approved_facts_or_the_plan(question: str) -> None:
+    assert "ungrounded_claim" in fu(question, "trade-offs")
+
+
+@pytest.mark.parametrize("question", [
+    "In your own words, which trade-offs does Kafka make?",
+    "What is your opinion of the trade-offs Kafka makes?",
+    "Which trade-offs matter most in your view when choosing PostgreSQL?",
+    "Could you expand your answer on the trade-offs of Kafka?",
+    "What would your approach to the trade-offs of Kafka be?",
+    "Which trade-offs does Kafka make for throughput?",  # no presumption at all
+    "What was your TrustLens architecture like, given the trade-offs?",  # grounded: cited fact
+    "Which trade-offs did you weigh in TrustLens?",  # grounded presumption
+])
+def test_your_alone_does_not_make_a_presumption(question: str) -> None:  # false positives
+    assert "ungrounded_claim" not in fu(question, "trade-offs")
 
 
 def test_unanchored_reference_in_a_rephrase() -> None:  # X5

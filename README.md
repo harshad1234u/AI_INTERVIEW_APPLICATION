@@ -744,7 +744,10 @@ POST .../answers   (explicit length check before the lock) → row lock · repla
 - **Model wording** (`{question, anchor}` / `{question}` only) passes deterministic rules: the
   anchor is in the answer **and** plan vocabulary, safe, named in the question, not used before;
   no presumption resting on anything but approved cited facts and the plan topic (answer text never
-  grounds a claim); no evaluative, hiring or §19 language; no URLs or markup; no uncited project;
+  grounds a claim). A presumption is a cited fact named, "you used/built/implemented/chose/designed/
+  worked on", "did/have/had you", or "your" before something a candidate owns or uses ("your
+  Kafka setup", "your experience"). "Your own words", "your opinion" or "your answer" presume
+  nothing; no evaluative, hiring or §19 language; no URLs or markup; no uncited project;
   no duplicate. A rejection gets one re-request naming the rule codes, then the deterministic
   chain: term template → generic follow-up (if unused) → next topic → finish.
 - **Prompt boundary:** the instructions hold closed-set values only. The topic (title, templates,
