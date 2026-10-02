@@ -4,7 +4,10 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 10 (Retry) — `POST .../retry` turns a completed interview's topics to
+**Current status:** Phase 11 (Text interview UI) — the browser now runs the whole interview at
+`/interview`: profile confirmation, planning with explicit AI consent, questions and answers,
+pause/resume, feedback, the report and retry, all through the existing API (see
+[Text Interview UI](#text-interview-ui)). Builds on Phase 10 (Retry): `POST .../retry` turns a completed interview's topics to
 practise into a new, ready-to-start session with those topics copied word for word, after
 re-checking their profile facts. No model call and no migration. Builds on the report (Phase 9:
 once every answer of a finished interview is evaluated, `POST .../report` completes the session
@@ -15,7 +18,7 @@ interview), the interviewer (Phase 7: code decides every topic, follow-up, rephr
 finish; a model may only word a follow-up or rephrase, with consent), the interview planner
 (Phase 6), the
 interview state machine (Phase 5), the provider-independent model gateway (Phase 4) and resume
-processing with candidate review. Backend only: the interview UI is a later phase.
+processing with candidate review.
 
 > AI is **optional and off by default**. Uploads always use the rule-based extractor; AI
 > extraction runs only when a candidate clicks "Find more with AI" on a configured server, and
@@ -64,9 +67,11 @@ backend/
   alembic/                     Migrations (reads DATABASE_URL via app settings)
   tests/                       pytest suite, runs against a separate test database
 frontend/
-  app/                         Next.js App Router pages
+  app/                         Next.js App Router pages (/ and /interview)
   components/                  BackendStatus, CandidateProfile, ResumeSection
+  components/interview/        Interview screens: flow, setup, turn, feedback, report
   lib/api.ts                   The only place that calls fetch (reads NEXT_PUBLIC_API_URL)
+  lib/interview.ts             Pure UI logic (status → screen, labels, fixed copy); node --test
 ```
 
 ## Prerequisites
@@ -1088,6 +1093,39 @@ Not served when `ENVIRONMENT=production`.
 - The retry keeps the source's duration setting, so a short retry ends early with
   `PLAN_COMPLETED`.
 
+## Text Interview UI
+
+> The full specification is [docs/phase-11-text-interview-ui-plan.md](docs/phase-11-text-interview-ui-plan.md).
+
+`/interview` (linked from the profile card) is a browser client for the API above. It doesn't
+duplicate any backend rule:
+- **Screens:** chosen from the session's `status`.
+- **Turns:** the next question is whatever `POST .../questions/next` returns.
+- **Timer:** the server's figure, counted down locally for display only.
+- **Errors:** server messages (`409`, `422`, `503`) are shown as they are.
+
+- **Recovery:** on load it finds the candidate's unfinished session and offers **Resume** or
+  **Discard** (the server allows one at a time). It never creates a second one.
+- **AI consent:** per session, off by default, with a disclosure. It is never copied between
+  sessions. With it off, no model is asked; AI evaluation needs it to be on before the report.
+- **Answers:** an unsent answer stays in memory only, never in browser storage or URLs. It
+  survives a pause and a network failure (shown with a message, sent again on retry), and is lost
+  on reload.
+- **Answer kinds:** Submit, Ask to rephrase, I don't know, Skip. The 10,000-character limit is the
+  server's: the page shows a count and warning but never truncates.
+- **Feedback:** one evaluation request per answer with "Evaluating answer i of n…", then the
+  report.
+- **Report:** every section as returned. Scores are shown per criterion of one answer, never
+  combined. Quotes and feedback are plain text.
+- **Retry:** shown only when the report says it is available, and it opens the new READY session.
+
+Limitations:
+- no authentication (local use only, like the API);
+- no rate limiting;
+- closing the browser does not pause the interview (use Pause);
+- an unsent answer is lost on reload;
+- no voice, progress history or multilingual UI.
+
 ## Environment variables
 
 | Variable | Where | Required | Default | Purpose |
@@ -1119,6 +1157,7 @@ Never commit `.env` / `.env.local`; only the `.env.example` files belong in git.
 .venv/Scripts/python -m pytest
 
 # frontend (from frontend/)
+npm test            # node --test lib/**/*.test.ts (Node 22.6+ runs TypeScript natively)
 npm run typecheck
 npm run lint
 npm run build
