@@ -1,8 +1,25 @@
-# Phase 9 — Report Generation: Draft Plan (revision 1)
+# Phase 9 — Report Generation: Final Plan (revision 2)
 
-Status: **draft for decision. No code exists, and none is written until you approve it.**
+Status: **approved (2026-10-02).**
+- R1–R18 were approved as recommended.
+- C-R1–C-R9 are resolved as recommended.
+- Revision 1 (`1c4bb06`) was the draft. This revision changes only what §0 lists.
 
-Repository at the time of writing:
+## 0. Approval and changes from revision 1
+
+The approval message takes precedence over this draft where they differ. None of the changes
+contradicts an approved decision.
+
+| # | Revision 1 | Revision 2 | Source |
+|---|---|---|---|
+| V1 | `report_version: 1` in the response (R18) | **Removed.** No report version, snapshot or history of any kind. | Approval R7, R18 |
+| V2 | `generated_at` (the time of the read) in the response (R8) | **Removed.** Repeated reads of the same data return identical content. | Approval R8, §7 |
+| V3 | Retry section absent (R1, C-R6) | **Present and explicit:** `retry: {available: false, note}`, and likewise `speech_metrics` under communication observations | Approval §4: "represent that explicitly rather than inventing data" |
+| V4 | R15: "The fixed text passes the evaluator's `HIRING` … checks" | Every fixed sentence passes them **except the §6 limitations notice**. That notice deliberately says "not a hiring assessment", "Scores", "correctness" and "wrong". It is tested to equal the approved text exactly. | Internal inconsistency of revision 1, §5.3 vs §6 |
+| V5 | Summary "started/finished time" (R1) | **Active time only** (`active_seconds`). No finish timestamp is stored: `updated_at` changes again at `REPORT_READY`, and nothing records the finish moment. | §9 of the brief: no inferred data |
+| V6 | `POST .../report` | It first applies the interview time limit, as every interview write request does (Phase 7 §6.3, as `/actions` does). An expired running interview is closed (`TIME_LIMIT`, committed), and the report request is then checked against the closed session. | Phase 7 contract |
+
+Repository at the time of writing revision 1:
 - `main` = `c2e7d3f` (Phase 8 complete), clean tree;
 - Alembic head `3a4785ecf08e`;
 - suite: 1314 passed, 3 skipped (the opt-in live tests).
@@ -223,13 +240,11 @@ No change to `TRANSITIONS`, events or states. Under one lock and one transaction
 | `POST /api/interview-sessions/{id}/report` `{}` | `200 {session_id, status: COMPLETED, report}`; the first call completes the session, repeats return the same view | `404` session · `409` "The report is available after the interview has finished." (not finished) · `409` "Evaluate every answer before requesting the report: {n} not evaluated yet." · `422` any body field · `503` |
 | `GET /api/interview-sessions/{id}/report` | `200 {session_id, status, report}` in `COMPLETED` | `404` · `409` "The report has not been generated yet." (D11) |
 
-- **Report fields:**
-  - `report_version`;
-  - `generated_at`;
+- **Report fields** (revision 2: no `report_version` or `generated_at`, V1, V2):
   - `summary`, `questions`, `coverage`;
   - `shown_clearly`, `to_practise`, `answer_evidence`;
   - `communication_observations`, `topics_to_practise`, `recommended_practice`;
-  - `limitations`.
+  - `retry` (V3), `score_scale`, `limitations`.
 - **References:** every item carries `question_id` / `seq` / `topic_position`.
 - **Schema:** `extra="forbid"`, and no score/total/rank field at report level.
 - **Authorization:** `get_interview_session` (the single access point, L4). Only the requested
