@@ -52,8 +52,12 @@ class AnswerKind(StrEnum):
 
 class EvaluationStatus(StrEnum):
     # Stored, and not evaluated: no score, rubric result, evidence or missing-concept analysis
-    # exists for it. Phase 8 adds values.
+    # exists for it. Every answer starts here; only the evaluator (Phase 8) moves it on, and only
+    # after the interview finished.
     NOT_EVALUATED = "NOT_EVALUATED"
+    NOT_APPLICABLE = "NOT_APPLICABLE"  # SKIP, DONT_KNOW or CLARIFY: nothing to evaluate
+    OBSERVATIONS_ONLY = "OBSERVATIONS_ONLY"  # deterministic observations, no scores
+    EVALUATED = "EVALUATED"  # validated AI rubric evaluation
 
 
 class InterviewQuestion(Base):

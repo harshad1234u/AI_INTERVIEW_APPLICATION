@@ -597,7 +597,7 @@ def test_interviewer_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {FINISH_REASON_REVISION}
+    assert _current_heads() == {HEAD} == {EVALUATOR_REVISION}
 
 
 # ---------- NO_ELIGIBLE_TOPIC finish reason (Decision A) ----------
@@ -654,7 +654,7 @@ def test_finish_reason_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {FINISH_REASON_REVISION}
+    assert _current_heads() == {HEAD} == {EVALUATOR_REVISION}
 
 
 # ---------- question text limit: 640 (approved 2026-10-02) ----------
@@ -672,3 +672,209 @@ def test_question_text_column_limit(db_session: Session, length: int, stored: bo
         with pytest.raises(DataError) as exc:
             _question(db_session, sid, text=question)
         assert "character varying(640)" in str(exc.value.orig)
+
+
+# ---------- Phase 8: answer evaluations ----------
+
+EVALUATOR_REVISION = "3a4785ecf08e"
+EVALUATION_CHECKS = {f"ck_answer_evaluations_{n}" for n in (
+    "rubric", "source", "rules_reason", "rules_reason_matches_source", "rubric_version_positive",
+    "attempts_range", "word_count_not_negative", "feedback_length", "lists_are_arrays",
+    "rules_has_no_model_content")}
+CRITERION_CHECKS = {f"ck_answer_evaluation_criteria_{n}" for n in (
+    "criterion", "score_range", "evidence_is_array", "score_needs_evidence")}
+
+
+def test_evaluation_tables_schema() -> None:
+    insp = inspect(engine)
+    assert {c["name"] for c in insp.get_columns("answer_evaluations")} == {
+        "question_id", "rubric", "rubric_version", "source", "rules_reason", "attempts",
+        "word_count", "concepts_mentioned", "missing_concepts", "claims_to_verify", "feedback",
+        "provider_call_id", "created_at", "updated_at"}  # no answer copy, no overall score
+    assert {c["name"] for c in insp.get_check_constraints("answer_evaluations")} == \
+        EVALUATION_CHECKS
+    fks = {fk["referred_table"]: (fk["constrained_columns"], fk["options"].get("ondelete"))
+           for fk in insp.get_foreign_keys("answer_evaluations")}
+    assert fks == {"interview_questions": (["question_id"], "CASCADE"),
+                   "provider_calls": (["provider_call_id"], "SET NULL")}
+    assert insp.get_pk_constraint("answer_evaluations")["constrained_columns"] == ["question_id"]
+    assert {c["name"] for c in insp.get_columns("answer_evaluation_criteria")} == {
+        "question_id", "criterion", "score", "evidence"}
+    assert {c["name"] for c in insp.get_check_constraints("answer_evaluation_criteria")} == \
+        CRITERION_CHECKS
+    [fk] = insp.get_foreign_keys("answer_evaluation_criteria")
+    assert (fk["referred_table"], fk["options"].get("ondelete")) == ("answer_evaluations", "CASCADE")
+    assert insp.get_pk_constraint("answer_evaluation_criteria")["constrained_columns"] == [
+        "question_id", "criterion"]
+
+
+EVALUATION = {"rubric": "TECHNICAL_PROJECT", "rubric_version": 1, "source": "AI",
+              "rules_reason": None, "attempts": 1, "word_count": 12,
+              "concepts_mentioned": "[]", "missing_concepts": "[]", "claims_to_verify": "[]",
+              "feedback": "Clear structure."}
+JSON_COLUMNS = ("concepts_mentioned", "missing_concepts", "claims_to_verify")
+
+
+def _answered_question(db: Session) -> str:
+    sid = _waiting_session(db)
+    _question(db, sid, **ANSWERED)
+    return str(db.scalar(text("SELECT id FROM interview_questions WHERE session_id = :s"),
+                         {"s": sid}))
+
+
+def _evaluation(db: Session, question_id: str, **overrides: object) -> None:
+    row = {**EVALUATION, **overrides}
+    values = [f"CAST(:{k} AS jsonb)" if k in JSON_COLUMNS else f":{k}" for k in row]
+    with db.begin_nested():
+        db.execute(text(f"INSERT INTO answer_evaluations (question_id, {', '.join(row)}) "
+                        f"VALUES (:q, {', '.join(values)})"), {"q": question_id, **row})
+
+
+def _criterion(db: Session, question_id: str, criterion: str = "relevance",
+               score: int | None = 4, evidence: str = '["B-trees."]') -> None:
+    with db.begin_nested():
+        db.execute(text("INSERT INTO answer_evaluation_criteria (question_id, criterion, score, "
+                        "evidence) VALUES (:q, :c, :s, CAST(:e AS jsonb))"),
+                   {"q": question_id, "c": criterion, "s": score, "e": evidence})
+
+
+@pytest.mark.parametrize(("bad", "constraint"), [
+    ({"rubric": "OVERALL"}, "rubric"),
+    ({"source": "MODEL", "rules_reason": "NOT_REQUESTED", "feedback": None}, "source"),
+    ({"source": "RULES", "feedback": None}, "rules_reason_matches_source"),
+    ({"rules_reason": "NOT_REQUESTED"}, "rules_reason_matches_source"),
+    ({"rules_reason": "MODEL_SAID_SO", "source": "RULES", "feedback": None}, "rules_reason"),
+    ({"rubric_version": 0}, "rubric_version_positive"),
+    ({"attempts": 3}, "attempts_range"),
+    ({"word_count": -1}, "word_count_not_negative"),
+    ({"feedback": "x" * 601}, "feedback_length"),
+    ({"claims_to_verify": '{"a": 1}'}, "lists_are_arrays"),
+    ({"source": "RULES", "rules_reason": "NOT_REQUESTED"}, "rules_has_no_model_content"),
+    ({"source": "RULES", "rules_reason": "NOT_REQUESTED", "feedback": None,
+      "missing_concepts": '["indexes"]'}, "rules_has_no_model_content"),
+])
+def test_database_rejects_invalid_evaluations(db_session: Session, bad: dict,
+                                              constraint: str) -> None:
+    qid = _answered_question(db_session)
+    with pytest.raises(IntegrityError) as exc:
+        _evaluation(db_session, qid, **bad)
+    assert exc.value.orig.diag.constraint_name == f"ck_answer_evaluations_{constraint}"
+
+
+@pytest.mark.parametrize(("criterion", "score", "evidence", "constraint"), [
+    ("technical_accuracy", 4, '["B-trees."]', "ck_answer_evaluation_criteria_criterion"),
+    ("overall", 4, '["B-trees."]', "ck_answer_evaluation_criteria_criterion"),
+    ("relevance", 0, '["B-trees."]', "ck_answer_evaluation_criteria_score_range"),
+    ("relevance", 6, '["B-trees."]', "ck_answer_evaluation_criteria_score_range"),
+    ("relevance", 4, "[]", "ck_answer_evaluation_criteria_score_needs_evidence"),
+    ("relevance", None, '"B-trees."', "ck_answer_evaluation_criteria_evidence_is_array"),
+])
+def test_database_rejects_invalid_criteria(db_session: Session, criterion: str, score: object,
+                                           evidence: str, constraint: str) -> None:
+    qid = _answered_question(db_session)
+    _evaluation(db_session, qid)
+    with pytest.raises(IntegrityError) as exc:
+        _criterion(db_session, qid, criterion, score, evidence)
+    assert exc.value.orig.diag.constraint_name == constraint
+
+
+def test_one_evaluation_per_answer_one_row_per_criterion_and_no_orphans(
+    db_session: Session,
+) -> None:
+    qid = _answered_question(db_session)
+    _evaluation(db_session, qid)
+    _criterion(db_session, qid, "relevance", 1)  # the range's ends, and "insufficient evidence"
+    _criterion(db_session, qid, "reasoning", 5)
+    _criterion(db_session, qid, "completeness", None, "[]")
+    for insert, constraint in [
+        (lambda: _evaluation(db_session, qid), "pk_answer_evaluations"),
+        (lambda: _criterion(db_session, qid), "pk_answer_evaluation_criteria"),
+        (lambda: _evaluation(db_session, str(uuid.uuid4())),
+         "fk_answer_evaluations_question_id_interview_questions"),
+        (lambda: _criterion(db_session, _answered_question(db_session)),
+         "fk_answer_evaluation_criteria_question_id_answer_evaluations"),
+    ]:
+        with pytest.raises(IntegrityError) as exc:
+            insert()
+        assert exc.value.orig.diag.constraint_name == constraint
+
+
+def test_answer_statuses_widened_and_still_closed(db_session: Session) -> None:
+    sid = _waiting_session(db_session)
+    for seq, status in enumerate(("NOT_EVALUATED", "NOT_APPLICABLE", "OBSERVATIONS_ONLY",
+                                  "EVALUATED"), 1):
+        _question(db_session, sid, seq=seq, **{**ANSWERED, "evaluation_status": status})
+    with pytest.raises(IntegrityError) as exc:
+        _question(db_session, sid, seq=9, **{**ANSWERED, "evaluation_status": "SCORED"})
+    assert exc.value.orig.diag.constraint_name == "ck_interview_questions_evaluation_status"
+
+
+def test_evaluations_cascade_with_answers_sessions_and_candidates(db_session: Session) -> None:
+    qid = _answered_question(db_session)
+    call = db_session.scalar(text(
+        CALL_COLUMNS + "VALUES ('r', 'ANSWER_EVALUATION', 'groq', true, 1, false, 0) RETURNING id"))
+    _evaluation(db_session, qid, provider_call_id=call)
+    _criterion(db_session, qid)
+    db_session.execute(text("DELETE FROM provider_calls WHERE id = :p"), {"p": call})
+    assert db_session.scalar(text("SELECT provider_call_id FROM answer_evaluations")) is None
+    db_session.execute(text("DELETE FROM candidates"))
+    for table in ("answer_evaluation_criteria", "answer_evaluations", "interview_questions"):
+        assert db_session.scalar(text(f"SELECT count(*) FROM {table}")) == 0
+
+
+@pytest.fixture
+def committed_evaluation_rows(request: pytest.FixtureRequest) -> Iterator[None]:
+    """A finished answer with an evaluation row, or only a status, committed; cleaned up after."""
+    with engine.begin() as conn:
+        cid = conn.scalar(insert(Candidate).values(
+            email=f"{uuid.uuid4().hex}@example.com", name="Downgrade").returning(Candidate.id))
+        sid = conn.scalar(text("INSERT INTO interview_sessions (candidate_id, status, plan) "
+                               "VALUES (:c, 'REPORT_GENERATION', CAST('{}' AS jsonb)) "
+                               "RETURNING id"), {"c": cid})
+        status = "NOT_APPLICABLE" if request.param == "status" else "OBSERVATIONS_ONLY"
+        qid = conn.scalar(text(
+            "INSERT INTO interview_questions (session_id, seq, topic_position, kind, "
+            "followup_index, rephrase_index, text, source, rules_reason, clock_at_ask, "
+            "answer_kind, answer_text, answered_at, evaluation_status) VALUES (:s, 1, 1, 'TOPIC', "
+            "0, 0, 'Q?', 'RULES', 'NOT_REQUESTED', 0, 'ANSWER', 'A.', now(), :st) RETURNING id"),
+            {"s": sid, "st": status})
+        if request.param == "evaluation":
+            conn.execute(text(
+                "INSERT INTO answer_evaluations (question_id, rubric, rubric_version, source, "
+                "rules_reason, attempts, word_count, concepts_mentioned, missing_concepts, "
+                "claims_to_verify) VALUES (:q, 'TECHNICAL_PROJECT', 1, 'RULES', 'NOT_REQUESTED', "
+                "1, 1, '[]', '[]', '[]')"), {"q": qid})
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+@pytest.mark.parametrize("committed_evaluation_rows", ["evaluation", "status"], indirect=True)
+def test_evaluator_downgrade_refuses_while_evaluations_exist(
+    committed_evaluation_rows: None,
+) -> None:
+    with pytest.raises(RuntimeError, match="Refusing to downgrade"):
+        command.downgrade(Config(str(ALEMBIC_INI)), FINISH_REASON_REVISION)
+    assert _current_heads() == {HEAD}
+    assert "answer_evaluations" in inspect(engine).get_table_names()
+
+
+def test_evaluator_revision_downgrades_and_re_upgrades_cleanly() -> None:
+    cfg = Config(str(ALEMBIC_INI))
+    with engine.begin() as conn:  # evaluation-call metadata: the older CHECK cannot hold it
+        conn.execute(text(CALL_COLUMNS + "VALUES ('roundtrip-e', 'ANSWER_EVALUATION', "
+                                         "'groq', false, 1, false, 0)"))
+    command.downgrade(cfg, FINISH_REASON_REVISION)
+    try:
+        assert _current_heads() == {FINISH_REASON_REVISION}
+        insp = inspect(engine)
+        assert not {"answer_evaluations", "answer_evaluation_criteria"} & set(insp.get_table_names())
+        with engine.connect() as conn:
+            assert not conn.scalar(text(
+                "SELECT count(*) FROM provider_calls WHERE request_id = 'roundtrip-e'"))
+    finally:
+        command.upgrade(cfg, "head")
+    command.check(cfg)
+    assert _current_heads() == {HEAD} == {EVALUATOR_REVISION}
