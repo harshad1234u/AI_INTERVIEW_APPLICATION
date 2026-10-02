@@ -4,10 +4,12 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 9 (Report) — once every answer of a finished interview is
-evaluated, `POST .../report` completes the session (`REPORT_GENERATION` → `COMPLETED`) and returns
-a deterministic report built from stored data: no model call, no stored copy, no combined score.
-Builds on the answer evaluator (Phase 8: criterion scores 1–5 backed by exact quotes with the
+**Current status:** Phase 10 (Retry) — `POST .../retry` turns a completed interview's topics to
+practise into a new, ready-to-start session with those topics copied word for word, after
+re-checking their profile facts. No model call and no migration. Builds on the report (Phase 9:
+once every answer of a finished interview is evaluated, `POST .../report` completes the session
+(`REPORT_GENERATION` → `COMPLETED`) and returns a deterministic report built from stored data: no
+model call, no stored copy, no combined score), the answer evaluator (Phase 8: criterion scores 1–5 backed by exact quotes with the
 session's AI consent, or deterministic observations without it; evaluation never changes the
 interview), the interviewer (Phase 7: code decides every topic, follow-up, rephrase and the
 finish; a model may only word a follow-up or rephrase, with consent), the interview planner
@@ -54,6 +56,7 @@ backend/
   app/services/interview_planner.py        Planner catalog, validation, fallback plan, persistence
   app/services/interviewer.py              Decisions, deadline, wording rules, consent, answers
   app/services/evaluator.py                Rubrics, observations, evaluation rules, persistence
+  app/services/retry.py                    Retry plan from the report's topics to practise
   app/api/routes/interview_sessions.py     Sessions, actions, planning, turns, evaluation
   app/api/routes/health.py     GET /api/health
   app/api/routes/candidates.py Candidate CRUD
@@ -988,7 +991,7 @@ time limit applied first (as on every interview write) · lock the session row
 | `communication_observations` | The stored `word_count` and planned concepts mentioned per answer. `speech_metrics` is `{available: false}`: answers are text only. |
 | `topics_to_practise` | Topics with at least one `to_practise` item, listing those criteria and concepts |
 | `recommended_practice` | One fixed sentence per distinct item, with the ids of the answers it comes from |
-| `retry` | `{available: false}`: there is no retry feature yet |
+| `retry` | `{available: true, note}` when there is a topic to practise, else `{available: false, note: "Nothing to retry."}` (Phase 10; see [Retry Practice Sessions](#retry-practice-sessions)) |
 | `score_scale`, `limitations` | The evaluator's 1–5 anchors, and a fixed notice |
 
 ### Rules
@@ -1026,9 +1029,64 @@ Not served when `ENVIRONMENT=production`. There is no authentication yet (see
 
 ### Limitations
 
-- No speech metrics, retry, progress tracking or candidate goals: those features don't exist yet.
+- No speech metrics, progress tracking or candidate goals: those features don't exist yet.
 - Why a planned topic was not asked is not stored, so it isn't shown.
 - No PDF and no AI coach narrative.
+
+## Retry Practice Sessions
+
+> The full specification is [docs/phase-10-retry-plan.md](docs/phase-10-retry-plan.md).
+
+A retry is a **new, normal interview session** made of a completed interview's topics to practise.
+It is not a new interview engine: code builds the plan from stored data, and the existing
+lifecycle runs it.
+
+```text
+POST .../retry {}
+lock the source row
+   not COMPLETED                                   → 409
+   report has no topics_to_practise                → 409
+   every such topic cites a fact no longer valid   → 409
+   otherwise: copy the valid topics word for word, renumber them 1..n,
+              create_session → CONFIRM_PROFILE → PLAN_READY → READY, commit (one transaction)
+```
+
+- **Selection:** every topic in the report's `topics_to_practise` at request time (Phase 9's rule,
+  not a second one). The client can't choose topics, and the body must be `{}`.
+- **Facts:** the interviewer's D8 check runs on the candidate's current facts. A topic is dropped
+  if a fact it cites was withdrawn, rejected, edited, recategorised or deleted.
+- **Copy:** topic text, templates, concepts and fact snapshots are copied unchanged. `settings`,
+  `source`, `rules_reason` and `omitted_groups` are kept, so question provenance (AI or RULES)
+  stays true. `competencies` is recomputed from the kept topics.
+- **Fresh session:** the retry belongs to the source's candidate (never a client-supplied id). It
+  starts with `ai_consent = false` and no consent events, questions, answers or evaluations. The
+  source stays `COMPLETED` and unchanged.
+- **No model:** no AI capability is used and no provider is called.
+
+### API
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `POST /api/interview-sessions/{id}/retry` `{}` | `201 {session_id, status: "READY", plan}` (the new session) | `404` · `409` `"Retry is available after the report has been generated."` · `409` `"There are no topics to retry."` · `409` `"No topic can be retried: the profile details they relied on have changed."` · `409` unfinished session exists (the create-session message) · `409` profile facts pending review · `422` any body field · `503` |
+
+Not served when `ENVIRONMENT=production`.
+
+### Privacy and concurrency
+
+- **Privacy:** only plan data is copied. Answers, evaluations, scores, quotes, feedback and
+  report text are not. There is no link to the source. Deleting the source leaves the retry
+  session (with its copied plan). Deleting the candidate removes both. Logs hold session ids and
+  topic counts only.
+- **Concurrency:** requests serialize on the source row lock. Of two simultaneous retries, one
+  gets `201` and the other gets `409` from the one-active-session unique index. A source deleted
+  while a retry waits gives `404` and creates nothing.
+
+### Limitations
+
+- No source link, retry history or cross-session progress tracking. No topic selection.
+- No retry button in the frontend yet.
+- The retry keeps the source's duration setting, so a short retry ends early with
+  `PLAN_COMPLETED`.
 
 ## Environment variables
 
