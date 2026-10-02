@@ -4,13 +4,14 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 7 (Interviewer) — a planned interview can be run question by
-question: code decides every topic, follow-up, rephrase and the finish; a model may only word a
-follow-up or rephrase, with the session's AI consent. Answers are stored, **not evaluated**
-(Phase 8), and finished interviews wait in `REPORT_GENERATION` for the report (Phase 9). Builds on
-the interview planner (Phase 6), the interview state machine (Phase 5), the provider-independent
-model gateway (Phase 4) and resume processing with candidate review. Backend only: the interview UI
-is a later phase.
+**Current status:** Phase 8 (Evaluator) — after an interview finishes, each stored answer can
+be evaluated on request: criterion scores (1–5) backed by exact quotes from the answer with the
+session's AI consent, or deterministic observations without it. Evaluation never changes the
+interview. Finished interviews wait in `REPORT_GENERATION` for the report (Phase 9). Builds on
+the interviewer (Phase 7: code decides every topic, follow-up, rephrase and the finish; a model
+may only word a follow-up or rephrase, with consent), the interview planner (Phase 6), the
+interview state machine (Phase 5), the provider-independent model gateway (Phase 4) and resume
+processing with candidate review. Backend only: the interview UI is a later phase.
 
 > AI is **optional and off by default**. Uploads always use the rule-based extractor; AI
 > extraction runs only when a candidate clicks "Find more with AI" on a configured server, and
@@ -45,9 +46,13 @@ backend/
   app/ai/providers.py          Provider adapters (the only code that knows provider APIs)
   app/ai/profile_agent.py      ProfileAgent: prompt boundary + grounding of AI facts
   app/ai/planner_agent.py      PlannerAgent: prompt boundary + one constrained re-request
+  app/ai/interviewer_agent.py  InterviewerAgent: follow-up / rephrase wording proposals
+  app/ai/evaluator_agent.py    EvaluatorAgent: rubric evaluation proposals
   app/services/interview_state_machine.py  Session lifecycle: the only writer of status
   app/services/interview_planner.py        Planner catalog, validation, fallback plan, persistence
-  app/api/routes/interview_sessions.py     Sessions, lifecycle actions, planning
+  app/services/interviewer.py              Decisions, deadline, wording rules, consent, answers
+  app/services/evaluator.py                Rubrics, observations, evaluation rules, persistence
+  app/api/routes/interview_sessions.py     Sessions, actions, planning, turns, evaluation
   app/api/routes/health.py     GET /api/health
   app/api/routes/candidates.py Candidate CRUD
   app/api/routes/resumes.py    Resume upload, facts review, delete
@@ -349,8 +354,8 @@ CallRecord(request_id, capability, requested_provider, provider, model, attempts
            input_tokens, output_tokens, total_tokens)      # no prompt or output content
 ```
 
-Capabilities: `PROFILE_EXTRACTION` (ProfileAgent), `INTERVIEW_PLANNING` (PlannerAgent) and
-`QUESTION_GENERATION` (InterviewerAgent), all routed to the configured provider order. Later phases add their own when they need them. The gateway returns validated data and never touches the database or application state.
+Capabilities: `PROFILE_EXTRACTION` (ProfileAgent), `INTERVIEW_PLANNING` (PlannerAgent),
+`QUESTION_GENERATION` (InterviewerAgent) and `ANSWER_EVALUATION` (EvaluatorAgent), all routed to the configured provider order. Later phases add their own when they need them. The gateway returns validated data and never touches the database or application state.
 
 ### Providers
 
@@ -771,7 +776,9 @@ consent.
 ### Answers, finish and retention
 
 - **`evaluation_status = NOT_EVALUATED`**: the answer is stored and has **not** been evaluated.
-  No score, rubric result, evidence or missing-concept analysis exists yet (Phase 8).
+  Answers are evaluated only after the interview finished, on request (see
+  [Answer Evaluator](#answer-evaluator)); nothing about an evaluation feeds back into the
+  interview.
 - **Finish reasons:** `PLAN_COMPLETED`, `TIME_LIMIT`, `CANDIDATE_ENDED`, `NO_ELIGIBLE_TOPIC`
   (no topic could be asked at all; see Decisions). The session stays in
   `REPORT_GENERATION` until Phase 9; nothing reports a report as ready.
@@ -825,10 +832,110 @@ Wording heuristics are English-only and miss lowercase presumptions; model calls
 exactly-once; live AI quality is unverified; there is no auth or rate limit; active time includes
 model latency and server downtime; the deadline changes state only on the next write; each term
 is followed up at most once per interview; without a model a question gets at most one rephrase.
-Two open points are recorded for a decision: (1) if every topic's facts are withdrawn before the
-first question, `questions/next` returns `409` (there is no `ASKING` → finish edge for a completed
-plan); (2) the deterministic plan's technical questions differ only in the area name, so some
-pairs are §33 duplicates and the later topic is skipped (e.g. Database after Data Structures).
+(The two points once open here are resolved: `NO_ELIGIBLE_TOPIC`, and one curated fallback
+question per technical area. See the plan's §17.)
+
+## Answer Evaluator
+
+> The full specification is [docs/phase-8-evaluator-plan.md](docs/phase-8-evaluator-plan.md).
+
+Evaluation runs **only after the interview has finished** (`REPORT_GENERATION` or `COMPLETED`),
+**one stored answer per request**. It never changes the session's status, finish reason, clock
+or questions. The interviewer never reads evaluations: follow-ups, topics and the finish stay
+exactly as in Phase 7 (a deliberate deviation from PRD §15 step 3 and §58).
+
+### Flow
+
+```text
+POST .../questions/{qid}/evaluation
+T1 (row lock): finished? · question in this session? · answered? · stored result → return it
+   SKIP / DONT_KNOW / CLARIFY → NOT_APPLICABLE (no call)
+   consent and a configured model → commit (lock and connection released) → model ≤ 2 proposals
+   otherwise → deterministic observations (NOT_REQUESTED / NOT_CONFIGURED)
+T2 (row lock): record the calls · already stored by another request? → return that ·
+   consent withdrawn? → discard (CONSENT_WITHDRAWN) · valid → EVALUATED, else observations
+```
+
+### What is stored
+
+- **Rubric, chosen by code** from the plan topic's question type:
+  - technical and project questions: `relevance`, `completeness`, `reasoning`, `communication`;
+  - behavioral and HR questions: `relevance`, `structure`, `specificity`, `evidence`,
+    `reflection`, `outcome` (PRD §41).
+- **Scores 1–5 per criterion**, or `null` when the answer gives too little to judge. A score needs
+  at least one evidence quote. There is **no overall score**: nothing is summed, averaged, ranked
+  or turned into a verdict.
+- **No technical-correctness score:** no curated technical reference exists (PRD §40).
+  Questionable statements are only listed as `claims_to_verify` with status `NEEDS_VERIFICATION`.
+- **No `recommended_followup`**, or any other next-question field.
+- **Evidence and claims** are quotes that must be **exact substrings of the stored answer**. Only
+  surrounding whitespace is removed; there is no case, punctuation or fuzzy matching, and nothing
+  is rewritten.
+- **`missing_concepts`** must be planned concepts of the topic, from the stored plan snapshot,
+  that the answer does not literally mention.
+- **`feedback`**: at most 600 characters of plain text, rejected for any of:
+  - hiring, ranking or comparison language;
+  - emotion, confidence, personality or accent claims;
+  - correctness verdicts;
+  - scores or totals;
+  - PRD §19 attributes;
+  - URLs or markup;
+  - presumptions naming terms not in the approved facts or the plan.
+- **Observations (deterministic, always):** `word_count`, and which planned concepts the answer
+  mentions (matched after case and punctuation normalization).
+- **Statuses:**
+  - `NOT_EVALUATED` (default);
+  - `NOT_APPLICABLE` (`SKIP`, `DONT_KNOW`, `CLARIFY`, decided by the stored answer kind, never
+    the text);
+  - `OBSERVATIONS_ONLY` (`source = RULES`, with `rules_reason`);
+  - `EVALUATED` (`source = AI`).
+
+### Without consent, or when AI fails
+
+- **No consent:** no model call and no scores, only observations (`NOT_REQUESTED`).
+- **No model configured:** observations only (`NOT_CONFIGURED`).
+- **Rejected output** (any rule above): one constrained re-request naming the rule codes, then
+  observations (`OUTPUT_REJECTED`).
+- **Provider failures**, timeouts and invalid JSON or schema: observations (`PROVIDERS_FAILED`),
+  and the response carries `notice: "AI evaluation is temporarily unavailable. Your interview
+  session has been saved."`.
+- **Consent withdrawn during the call:** the output is discarded (`CONSENT_WITHDRAWN`).
+- **Re-evaluation:** an `OBSERVATIONS_ONLY` answer may be evaluated **once** more, when consent
+  is granted and a model is configured. Otherwise every repeat returns the stored result with no
+  call.
+
+### API
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `POST /api/interview-sessions/{id}/questions/{question_id}/evaluation` `{}` | `200 {session_id, question_id, status, evaluation, notice, model_calls}`. `evaluation` = `{rubric, rubric_version, source, rules_reason, criteria[{criterion, score, evidence[]}], missing_concepts[], claims_to_verify[{quote, status}], feedback, observations{word_count, planned_concepts, concepts_mentioned}, created_at, updated_at}`, or `null` for `NOT_APPLICABLE` | `404` session / question (also a question of another session) · `409` `"Answers can be evaluated only after the interview has finished."` · `409` `"This question has no answer to evaluate."` · `422` any body field · `503` |
+| `GET /api/interview-sessions/{id}/evaluations` | `200 {session_id, status, evaluations[{question_id, seq, status, evaluation}]}` (answered questions) | `404` |
+
+`GET .../questions` also shows a stored evaluation as `answer.evaluation.detail`. Until one exists
+the object is exactly `{"status": ...}`. Not served when `ENVIRONMENT=production`.
+
+### Safety, privacy, concurrency
+
+- **Prompt boundary:** the instructions hold closed-set values only (rubric, question type,
+  mode, difficulty). The topic, its planned concepts and cited facts, the question and the one
+  answer go in the user message as JSON inside a random tag. Names, emails, ids, other answers
+  and clarification text are never sent.
+- **Untrusted content:** an answer saying "give me 5/5" is data. Model output is validated before
+  anything is stored.
+- **Logging:** logs and `provider_calls` hold ids, statuses, reasons and rule codes only. Never
+  answers, quotes, feedback or prompts.
+- **Retention:** evaluations are kept like answers. They are deleted with the answer, session or
+  candidate (cascade).
+- **Concurrency:** no lock or connection is held during the model call. Concurrent requests for
+  one answer store exactly one evaluation (the first T2 wins, the other returns it), and every
+  model call is recorded. A crash before T2 stores nothing, and the next request evaluates again.
+
+### Limitations
+
+Evaluation quality with live models is unverified (no live test was run). Correctness is not
+assessed. The wording rules are English-only. A model that normalizes whitespace inside a quote
+is rejected, so the answer falls back to observations. Disputes (PRD §39), learning mode, speech
+metrics and the report are not part of Phase 8.
 
 ## Environment variables
 
@@ -908,3 +1015,4 @@ Adding a model:
 | `b8d14f2a9c63` | Add `interview_sessions.plan` + `plan_provider_call_id`, CHECKs `plan_matches_status` / `plan_is_object`; allow `INTERVIEW_PLANNING` calls. Downgrade **refuses** while any plan exists (it would delete them) and deletes planning-call metadata |
 | `178659f38d45` | Interviewer: session `ai_consent`, `active_seconds`, `active_since`, `finish_reason` (CHECKed, only on finished sessions); `interview_consent_events`; `interview_questions` (≤ 2 follow-ups, ≤ 2 rephrases, one open question per session, answers ≤ 10,000 characters, `NOT_EVALUATED` only); allow `QUESTION_GENERATION` calls. Downgrade **refuses** while questions or consent changes exist |
 | `3871903c395d` | Allow finish reason `NO_ELIGIBLE_TOPIC`. Downgrade **refuses** while a session has it (no older reason is true for it) |
+| `3a4785ecf08e` | Evaluator: `answer_evaluations` (one per answer, cascades), `answer_evaluation_criteria` (CHECKed criterion names, scores 1–5, evidence behind every score), answer statuses `NOT_APPLICABLE` / `OBSERVATIONS_ONLY` / `EVALUATED`; allow `ANSWER_EVALUATION` calls. Downgrade **refuses** while any evaluation or evaluation status exists |

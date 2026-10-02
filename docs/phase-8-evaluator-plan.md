@@ -1,6 +1,6 @@
 # Phase 8 — Answer Evaluator: Final Plan (revision 2)
 
-Status: **approved and frozen (2026-10-02). Implementation follows this document.**
+Status: **approved and frozen (2026-10-02); implemented as specified (§7 lists the implementation notes).**
 
 - Revision 1 (`d8c2eb4`) was the draft. Its recommendations for C-E1–C-E5 and E1–E14 were
   approved without change.
@@ -163,3 +163,30 @@ Untouched: `services/interviewer.py` decisions, the state machine, `frontend/**`
 
 **Carried over:** `test_interview_turn_api.py` twice took about 6–10 minutes instead of about
 25 s. It then ran 9 times in 20–27 s, with no lock waits seen. It is not reproducible and not fixed.
+
+## 7. Implementation notes (2026-10-02)
+
+Implemented as specified in sections 1-6. Commits, after this plan (`f0e8c6e`):
+
+| Commit | Content |
+|---|---|
+| `d925565` | Schema, statuses, capability, migration `3a4785ecf08e` |
+| `9f50d6b` | Fix: `checked_enum` stores enum **values**. SQLAlchemy stores member names by default; every older enum has name = value, but `Criterion` (lower-case values) would have been refused by its CHECK. Found by the concurrency test. No schema change. |
+| `eb69547` | Service, rules, agent |
+| `d66e1c9` | API and its tests |
+| (docs commit) | README and this section |
+
+Details the plan left to implementation:
+- **Criterion order** is the rubric order, applied when reading (no order column).
+- **`hiring_language` (E6)** also catches comparison wording that the interviewer's word list
+  misses: "ranks", "ranked", "other candidates", "compared with others", "top N". The interviewer's
+  own list is unchanged.
+- **Deadline:** one evaluation request waits at most 60 s for the model (two proposals at most),
+  outside any interview clock.
+- **P1 reuse:** the Phase 7 grounding check was moved, unchanged, into
+  `interviewer.ungrounded_claim()`, so the feedback rule reuses it. Interviewer behaviour and tests
+  are unchanged.
+- **Schema failures vs rule failures:** a schema failure (score 7, unknown criterion, extra field
+  such as `recommended_followup`) fails inside the gateway as `INVALID_OUTPUT` and ends as
+  `PROVIDERS_FAILED`, as Phase 7 does for wording. A business-rule failure ends as
+  `OUTPUT_REJECTED`.
