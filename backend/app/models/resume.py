@@ -58,7 +58,9 @@ class Extractor(StrEnum):
 
 def checked_enum(cls: type[StrEnum], name: str) -> Enum:
     # VARCHAR + CHECK constraint instead of a native PG enum: same guarantee, simpler migrations.
-    return Enum(cls, name=name, native_enum=False, create_constraint=True, length=20)
+    # Values, not member names, are stored (they differ only for Criterion's lower-case values).
+    return Enum(cls, name=name, native_enum=False, create_constraint=True, length=20,
+                values_callable=lambda members: [m.value for m in members])
 
 
 class Resume(Base):
