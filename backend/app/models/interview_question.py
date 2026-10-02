@@ -22,8 +22,9 @@ from app.models.interview_session import RulesReason
 from app.models.resume import checked_enum
 
 ANSWER_MAX_LENGTH = 10_000  # Unicode code points, after stripping (D5)
-# Room for the longest deterministic rephrase: a 52-character frame + a 250-character topic title
-# + a 300-character plan question (tested in test_interviewer.py).
+# Room for the longest deterministic rephrase: a 54-character frame + a 250-character topic title
+# + a 300-character plan question = 604 (tested). Approved 2026-10-02 in place of the spec's 400;
+# the same limit applies to the column, the API schema and the tests.
 QUESTION_MAX_LENGTH = 640
 ANCHOR_MAX_LENGTH = 100
 MAX_FOLLOW_UPS = 2  # per question (D1)

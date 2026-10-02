@@ -1044,3 +1044,36 @@ def test_a_withdrawal_racing_the_first_question_is_seen_after_the_lock(
         (200, "NO_ELIGIBLE_TOPIC", None)] * 2
     with SessionLocal() as db:
         assert answers(db, sid_) == []
+
+
+# ---------- question text limit (640, approved 2026-10-02) ----------
+
+
+def test_the_longest_rephrase_is_stored_and_read_back_whole(
+    client: TestClient, sid: str, db_session: Session
+) -> None:
+    from app.models.resume import FACT_MAX_LENGTH
+    from app.schemas.interview_plan import InterviewPlan, PlannedTopic
+
+    title = ("Indexing " * 40)[:FACT_MAX_LENGTH + 49] + "!"  # the longest valid topic title
+    template = ("Why would an index " * 20)[:FACT_MAX_LENGTH + 99] + "?"  # and plan question
+    plan = InterviewPlan(
+        source="RULES", rules_reason="NOT_REQUESTED", settings=PlanSettings(**SETTINGS),
+        competencies=["database"], omitted_groups=[],
+        topics=[PlannedTopic(position=1, competency="database", question_type="TECHNICAL",
+                             difficulty="MEDIUM", basis="GENERIC", topic=title,
+                             question_templates=[template], expected_concepts=["indexes"],
+                             facts=[])])
+    apply_event(db_session, uuid.UUID(sid), E.PLAN_READY, plan=plan.model_dump(mode="json"))
+    db_session.commit()
+    act(client, sid, "START_INTERVIEW")
+    q = first_question(client, sid)
+    assert q["text"] == template and len(template) == 300
+    ans(client, sid, q["id"], kind="CLARIFY", said=None)
+    r = nxt(client, sid).json()["question"]
+    framed = REPHRASE_TEMPLATE.format(topic=title, question=template)
+    assert (r["kind"], r["text"], len(r["text"])) == ("REPHRASE", framed, 604)
+    stored = db_session.scalar(text("SELECT text FROM interview_questions WHERE id = :i"),
+                               {"i": r["id"]})
+    history = client.get(f"/api/interview-sessions/{sid}/questions").json()["questions"]
+    assert stored == history[1]["text"] == framed  # no truncation anywhere

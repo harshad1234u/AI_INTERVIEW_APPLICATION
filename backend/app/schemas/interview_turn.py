@@ -7,7 +7,13 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, StrictBool, StringConstraints
 
-from app.models.interview_question import AnswerKind, EvaluationStatus, QuestionKind, QuestionSource
+from app.models.interview_question import (
+    QUESTION_MAX_LENGTH,
+    AnswerKind,
+    EvaluationStatus,
+    QuestionKind,
+    QuestionSource,
+)
 from app.models.interview_session import FinishReason, InterviewStatus, RulesReason
 from app.schemas.interview_plan import (
     Competency,
@@ -111,7 +117,8 @@ class QuestionView(BaseModel):
     kind: QuestionKind
     followup_index: int
     rephrase_index: int
-    text: str  # untrusted text: render as plain text
+    # Untrusted text: render as plain text. Same limit as the column.
+    text: Annotated[str, StringConstraints(max_length=QUESTION_MAX_LENGTH)]
     source: QuestionSource
     rules_reason: RulesReason | None
     asked_at: datetime

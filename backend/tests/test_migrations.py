@@ -8,7 +8,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, insert, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.ai.gateway import ErrorKind, ModelCapability
@@ -655,3 +655,20 @@ def test_finish_reason_revision_downgrades_and_re_upgrades_cleanly() -> None:
         command.upgrade(cfg, "head")
     command.check(cfg)
     assert _current_heads() == {HEAD} == {FINISH_REASON_REVISION}
+
+
+# ---------- question text limit: 640 (approved 2026-10-02) ----------
+
+
+@pytest.mark.parametrize(("length", "stored"), [(639, True), (640, True), (641, False)])
+def test_question_text_column_limit(db_session: Session, length: int, stored: bool) -> None:
+    sid = _waiting_session(db_session)
+    question = "é" * (length - 1) + "?"  # code points, like the answer limit
+    if stored:
+        _question(db_session, sid, text=question)
+        assert db_session.scalar(text("SELECT text FROM interview_questions "
+                                      "WHERE session_id = :s"), {"s": sid}) == question
+    else:
+        with pytest.raises(DataError) as exc:
+            _question(db_session, sid, text=question)
+        assert "character varying(640)" in str(exc.value.orig)

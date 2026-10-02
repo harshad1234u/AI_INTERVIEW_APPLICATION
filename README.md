@@ -776,6 +776,8 @@ consent.
   `409 {"detail": "The interview time limit was reached, so this answer was not saved."}` and is
   not stored or logged; earlier answers are kept. A retry of an answer saved before the limit is
   `200`. Clients must keep the unsent text locally and show it with this message.
+- **Question text:** at most 640 characters, enforced by the column and the response schema. That
+  leaves room for the longest framed rephrase (604).
 - **Length:** at most 10,000 characters (Unicode code points, after stripping); longer →
   `422 {"detail": "Answer is too long: the limit is 10,000 characters."}`, nothing written.
 - **Retention:** answers live only in `interview_questions`, until the session or candidate is

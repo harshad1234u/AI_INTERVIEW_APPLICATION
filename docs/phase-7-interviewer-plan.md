@@ -500,7 +500,7 @@ full against earlier template questions too.
 |---|---|
 | `interview_sessions` | + `ai_consent boolean NOT NULL DEFAULT false`; + `active_since timestamptz NULL`; + `active_seconds double precision NOT NULL DEFAULT 0` with CHECK `active_seconds >= 0`; + `finish_reason varchar(20) NULL` with CHECK `IN ('PLAN_COMPLETED','TIME_LIMIT','CANDIDATE_ENDED')`; + CHECK `finish_reason IS NULL OR status IN ('REPORT_GENERATION','COMPLETED')`. Existing rows: consent false, clock 0/NULL, finish_reason NULL (no guessing). No reverse CHECK, because existing tests insert raw rows in those statuses. |
 | `interview_consent_events` (new) | `id bigint GENERATED ALWAYS AS IDENTITY PK`, `session_id uuid NOT NULL` FK → sessions **ON DELETE CASCADE**, `granted boolean NOT NULL`, `changed_at timestamptz NOT NULL DEFAULT clock_timestamp()`, index `(session_id, id)` |
-| `interview_questions` (new) | `id uuid PK default gen_random_uuid()` · `session_id` FK **CASCADE** · `seq int ≥ 1`, `UNIQUE(session_id, seq)` · `topic_position int ≥ 1` · `kind` CHECK `IN ('TOPIC','FOLLOW_UP','REPHRASE')` · `followup_index smallint` CHECK 0–2 (TOPIC ⇒ 0, FOLLOW_UP ⇒ ≥ 1) · `rephrase_index smallint` CHECK 0–2 (REPHRASE ⇔ ≥ 1) · `text varchar(400)` non-blank · `source` CHECK `IN ('AI','RULES')` · `rules_reason` (CHECK `(source='AI') = (rules_reason IS NULL)`) · `anchor varchar(100) NULL` (only AI follow-ups) · `provider_call_id` FK → provider_calls **SET NULL** · `asked_at timestamptz DEFAULT clock_timestamp()` · `clock_at_ask double precision ≥ 0` · `answer_kind` CHECK `IN ('ANSWER','CLARIFY','DONT_KNOW','SKIP')` · `answer_text text` CHECK `char_length ≤ 10000` · `answered_at timestamptz` · `evaluation_status` CHECK `IN ('NOT_EVALUATED')` · CHECK all of `answer_kind, answered_at, evaluation_status` are NULL together or non-NULL together · partial unique index `(session_id) WHERE answered_at IS NULL` (one open question) |
+| `interview_questions` (new) | `id uuid PK default gen_random_uuid()` · `session_id` FK **CASCADE** · `seq int ≥ 1`, `UNIQUE(session_id, seq)` · `topic_position int ≥ 1` · `kind` CHECK `IN ('TOPIC','FOLLOW_UP','REPHRASE')` · `followup_index smallint` CHECK 0–2 (TOPIC ⇒ 0, FOLLOW_UP ⇒ ≥ 1) · `rephrase_index smallint` CHECK 0–2 (REPHRASE ⇔ ≥ 1) · `text varchar(640)` non-blank (400 in revision 5; §17 C) · `source` CHECK `IN ('AI','RULES')` · `rules_reason` (CHECK `(source='AI') = (rules_reason IS NULL)`) · `anchor varchar(100) NULL` (only AI follow-ups) · `provider_call_id` FK → provider_calls **SET NULL** · `asked_at timestamptz DEFAULT clock_timestamp()` · `clock_at_ask double precision ≥ 0` · `answer_kind` CHECK `IN ('ANSWER','CLARIFY','DONT_KNOW','SKIP')` · `answer_text text` CHECK `char_length ≤ 10000` · `answered_at timestamptz` · `evaluation_status` CHECK `IN ('NOT_EVALUATED')` · CHECK all of `answer_kind, answered_at, evaluation_status` are NULL together or non-NULL together · partial unique index `(session_id) WHERE answered_at IS NULL` (one open question) |
 | `provider_calls` | capability CHECK adds `'QUESTION_GENERATION'` |
 | Downgrade | Refuses while any `interview_questions` or `interview_consent_events` row exists (Phase 6 precedent), then reverses everything and deletes `QUESTION_GENERATION` call metadata |
 
@@ -838,3 +838,18 @@ Approved after the Phase 7 commits (`97c0849`..`d0ad69d`). They supersede the se
   - a duplicate plan question is still skipped;
   - all four technical topics are asked with consent off, and with consent on but deterministic
     (providers failing, or none configured), for both ANSWER and SKIP progressions.
+
+### C. Question text limit: 640 characters (open point G1)
+
+- **Why:** the spec said 400, but the approved deterministic rephrase can be longer. A 54-character
+  frame plus the longest valid topic title (250) and plan question (300) is 604.
+- **Approved:** 640 at every layer:
+  - the column (`varchar(640)` since `178659f38d45`, so no new migration);
+  - `QUESTION_MAX_LENGTH`;
+  - the API schema (`QuestionView.text`, `max_length=640`).
+
+  Questions are never accepted as API input. Model wording stays at 300.
+- **Tests:**
+  - 639 and 640 are accepted and 641 rejected, by the column and by the schema;
+  - the 604-character rephrase is stored and read back through the API without truncation.
+- Answers stay at exactly 10,000.

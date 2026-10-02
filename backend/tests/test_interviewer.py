@@ -457,7 +457,27 @@ def test_a_duplicate_plan_question_is_still_skipped() -> None:  # Decision B: ru
 def test_framed_rephrase_fits_the_column() -> None:  # G1
     longest = REPHRASE_TEMPLATE.format(topic="t" * (FACT_MAX_LENGTH + 50),
                                        question="q" * (FACT_MAX_LENGTH + 100))
-    assert len(longest) <= QUESTION_MAX_LENGTH
+    assert len(longest) == 604 and QUESTION_MAX_LENGTH == 640
+
+
+@pytest.mark.parametrize(("length", "valid"), [(639, True), (640, True), (641, False)])
+def test_question_view_text_limit(length: int, valid: bool) -> None:  # same limit as the column
+    from datetime import datetime, timezone
+
+    from pydantic import ValidationError
+
+    from app.schemas.interview_turn import QuestionView
+
+    view = dict(id=uuid.uuid4(), seq=1, topic_position=1, topic="Database",
+                competency="database", question_type="TECHNICAL", difficulty="MEDIUM",
+                basis="GENERIC", kind="TOPIC", followup_index=0, rephrase_index=0,
+                text="q" * length, source="RULES", rules_reason="NOT_REQUESTED",
+                asked_at=datetime.now(timezone.utc), answer=None)
+    if valid:
+        assert len(QuestionView(**view).text) == length
+    else:
+        with pytest.raises(ValidationError):
+            QuestionView(**view)
 
 
 def test_model_rephrase_duplicates(  # R7, R8
