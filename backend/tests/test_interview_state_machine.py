@@ -37,6 +37,9 @@ PRD_EDGES = [
     # Phase 7 (Q1): the time limit, raised by the application only
     (S.ASKING, E.TIME_EXPIRED, S.REPORT_GENERATION),
     (S.WAITING_FOR_ANSWER, E.TIME_EXPIRED, S.REPORT_GENERATION),
+    # No eligible first topic (every topic's facts withdrawn): FINISH with NO_ELIGIBLE_TOPIC only,
+    # before any question (apply_event enforces both)
+    (S.ASKING, E.FINISH, S.REPORT_GENERATION),
 ]
 ALLOWED = {(frm, ev) for frm, ev, _ in PRD_EDGES}
 FORBIDDEN = [pair for pair in itertools.product(S, E) if pair not in ALLOWED]
@@ -60,7 +63,7 @@ def test_forbidden_transition(frm: S, event: E) -> None:
 
 
 def test_forbidden_list_is_the_full_complement() -> None:
-    assert len(FORBIDDEN) == len(S) * len(E) - len(PRD_EDGES) == 13 * 18 - 20
+    assert len(FORBIDDEN) == len(S) * len(E) - len(PRD_EDGES) == 13 * 18 - 21
 
 
 def test_completed_is_terminal() -> None:

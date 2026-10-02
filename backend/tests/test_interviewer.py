@@ -106,6 +106,40 @@ def test_finish_reason_only_with_finish_and_only_from_code(
     assert clock(db_session, ready) == ("READY", 0, False, None)
 
 
+def test_finish_from_asking_only_with_no_eligible_topic_before_any_question(
+    db_session: Session, ready: uuid.UUID
+) -> None:  # Decision A: the narrow ASKING -> FINISH edge
+    step(db_session, ready, E.START_INTERVIEW)
+    for reason in (FinishReason.PLAN_COMPLETED, FinishReason.TIME_LIMIT):
+        with pytest.raises(InvalidTransition):  # an ordinary finish never starts in ASKING
+            apply_event(db_session, ready, E.FINISH, finish_reason=reason)
+        db_session.rollback()
+    with pytest.raises(ValueError, match="FINISH needs"):  # not a candidate's reason either
+        apply_event(db_session, ready, E.FINISH, finish_reason=FinishReason.CANDIDATE_ENDED)
+    db_session.execute(text(  # a question exists: the interview has started for real
+        "INSERT INTO interview_questions (session_id, seq, topic_position, kind, followup_index, "
+        "rephrase_index, text, source, rules_reason, clock_at_ask) "
+        "VALUES (:s, 1, 1, 'TOPIC', 0, 0, 'Q?', 'RULES', 'NOT_REQUESTED', 0)"), {"s": ready})
+    with db_session.begin_nested(), pytest.raises(InvalidTransition):
+        apply_event(db_session, ready, E.FINISH, finish_reason=FinishReason.NO_ELIGIBLE_TOPIC)
+    db_session.execute(text("DELETE FROM interview_questions WHERE session_id = :s"), {"s": ready})
+    step(db_session, ready, E.FINISH, finish_reason=FinishReason.NO_ELIGIBLE_TOPIC)
+    status, _, running, reason = clock(db_session, ready)
+    assert (status, running, reason) == ("REPORT_GENERATION", False, "NO_ELIGIBLE_TOPIC")
+
+
+def test_no_eligible_topic_never_ends_a_started_interview(
+    db_session: Session, ready: uuid.UUID
+) -> None:
+    for event in (E.START_INTERVIEW, E.QUESTION_ASKED, E.ANSWER_SUBMITTED, E.ANSWER_PROCESSED,
+                  E.ANSWER_EVALUATED):
+        step(db_session, ready, event)
+    with pytest.raises(InvalidTransition):
+        apply_event(db_session, ready, E.FINISH, finish_reason=FinishReason.NO_ELIGIBLE_TOPIC)
+    db_session.rollback()
+    assert clock(db_session, ready)[::3] == ("NEXT_DECISION", None)
+
+
 def test_time_expired_has_exactly_two_edges(db_session: Session, ready: uuid.UUID) -> None:
     with pytest.raises(InvalidTransition):  # READY: not started, so nothing to expire
         apply_event(db_session, ready, E.TIME_EXPIRED)
@@ -271,6 +305,17 @@ def test_topics_with_withdrawn_facts_are_skipped(  # U6, D8
     # Nor is a follow-up or rephrase asked on a topic whose fact was withdrawn meanwhile.
     assert decide(ctx(q(1, 2), valid=ALL - {2})) == Intent(Action.TOPIC)
     assert decide(ctx(q(1, 2, answer=A.CLARIFY), valid=ALL - {2})) == Intent(Action.TOPIC)
+
+
+def test_first_topic_eligibility() -> None:  # Decision A, as pure decisions
+    s = turn(ctx(valid=ALL - {1, 2}))  # ineligible topics are passed over, in plan order
+    assert (s.kind, s.topic_position) == (K.TOPIC, 3)
+    s = turn(ctx(valid=frozenset()))  # nothing asked and nothing eligible
+    assert (s.kind, s.finish_reason) == (None, "NO_ELIGIBLE_TOPIC")
+    s = turn(ctx(q(1, 1, answer=A.SKIP), valid=frozenset()))  # after a question: the usual finish
+    assert (s.kind, s.finish_reason) == (None, "PLAN_COMPLETED")
+    # Deadline rules still come first.
+    assert decide(ctx(valid=frozenset(), elapsed=850.0)) == Intent(Action.FINISH, "TIME_LIMIT")
 
 
 @pytest.mark.parametrize(("elapsed", "starts"), [(840.0, True), (840.1, False), (899.9, False),

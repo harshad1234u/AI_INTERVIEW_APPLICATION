@@ -176,6 +176,7 @@ Unchanged principles:
 1. time_limit_reached (elapsed ≥ limit)                         → finish TIME_LIMIT
 2. a question would start and remaining < 60 s (Q3)             → finish TIME_LIMIT
 3. no question yet (ASKING)                                     → TOPIC(first valid topic)
+   (no valid topic at all → finish NO_ELIGIBLE_TOPIC, §17 A)
 4. last answer CLARIFY and rephrase_index < 2 (D3)              → REPHRASE(chain's original question)
    (§8.4: a duplicate rephrase is rejected and becomes NEXT_TOPIC, as in step 5)
 5. last answer CLARIFY (limit) / SKIP / DONT_KNOW               → NEXT_TOPIC
@@ -212,7 +213,8 @@ or any judgement of answer quality.
 | NEXT_DECISION | Uses the existing `FINISH` with a reason |
 | PAUSED | No edge needed: the clock is stopped while paused, so a paused session cannot expire |
 | `END_INTERVIEW` | Unchanged: still only from WAITING_FOR_ANSWER and PAUSED |
-| `finish_reason` in `apply_event` | Set on entering REPORT_GENERATION. `END_INTERVIEW` → `CANDIDATE_ENDED`. `TIME_EXPIRED` → `TIME_LIMIT`. `FINISH` **must** carry `PLAN_COMPLETED` or `TIME_LIMIT`, just as `PLAN_READY` must carry a plan; anything else raises `ValueError`. |
+| `finish_reason` in `apply_event` | Set on entering REPORT_GENERATION. `END_INTERVIEW` → `CANDIDATE_ENDED`. `TIME_EXPIRED` → `TIME_LIMIT`. `FINISH` **must** carry `PLAN_COMPLETED` or `TIME_LIMIT` (from NEXT_DECISION) or `NO_ELIGIBLE_TOPIC` (from ASKING, §17 A), just as `PLAN_READY` must carry a plan; anything else raises. |
+| `(ASKING, FINISH)` | **Added after implementation (§17 A):** only with `NO_ELIGIBLE_TOPIC` and only while the session has no question row |
 
 ### 6.2 Active-time clock (D4a, D4c)
 
@@ -550,6 +552,7 @@ column, so both are updated together.
   - `PLAN_COMPLETED`: no valid topic left.
   - `TIME_LIMIT`: deadline or reserve.
   - `CANDIDATE_ENDED`: `END_INTERVIEW`.
+  - `NO_ELIGIBLE_TOPIC` (§17 A): before the first question, every topic lost a cited fact.
 - **D11:** the session stays in `REPORT_GENERATION`. No API field says a report exists, and
   `COMPLETED` is reachable only via Phase 9's `REPORT_READY`.
 - **Retention (D9) safeguards:**
@@ -780,3 +783,34 @@ No test needs keys or credits. DB tests use PostgreSQL. Concurrency tests use co
 - Earlier: `489e853` (fix B, four files) and `302dfb3` (revision 4).
 - No Phase 7 application code, migration, dependency, configuration, test or frontend file was
   changed.
+
+---
+
+## 17. Decisions made after implementation (2026-10-02)
+
+Approved after the Phase 7 commits (`97c0849`..`d0ad69d`). They supersede the sections they name.
+
+### A. No eligible first topic (open point G2)
+
+- **Problem:** if every topic's cited facts were withdrawn or edited before the first question,
+  `questions/next` answered `409 "Your approved profile changed."` forever: there was no edge out of
+  ASKING for it.
+- **Decision:** a dedicated finish reason `NO_ELIGIBLE_TOPIC` and a narrow edge `(ASKING, FINISH) →
+  REPORT_GENERATION`.
+  - `next_topic()` returns it only when no question was asked yet. With an empty history no template
+    can be a duplicate, so "no topic" means every topic is ineligible under D8. In practice only a
+    project deep dive can hit it, since generic topics cite no facts.
+  - `apply_event` accepts FINISH from ASKING only with `NO_ELIGIBLE_TOPIC` and only while the session
+    has no question row. From NEXT_DECISION, `NO_ELIGIBLE_TOPIC` is refused. No `ClientAction` can
+    reach it, and `END_INTERVIEW` gains no edge.
+  - Deadline rules come first (`TIME_LIMIT`). After the first question, running out of topics is
+    still `PLAN_COMPLETED` (§5.1).
+  - `PLAN_COMPLETED`, `TIME_LIMIT` and `CANDIDATE_ENDED` were rejected as untrue for this case.
+- **API:** `200 {status: REPORT_GENERATION, finish_reason: NO_ELIGIBLE_TOPIC, question: null}`, with
+  no model call. Repeats return the same. Concurrent requests serialize on the row lock, so there is
+  exactly one transition.
+- **Migration `3871903c395d`:** widens the `finish_reason` CHECK. Its downgrade refuses while any
+  session has the value.
+- **Also fixed in the same branch:** if the 60 s reserve is crossed between `enforce_deadline` and
+  `decide()` while in ASKING, the session now gets `TIME_EXPIRED` (`TIME_LIMIT`). Before, it got the
+  "profile changed" 409.

@@ -521,9 +521,13 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
 - `TIME_EXPIRED` (Phase 7, system event): `ASKING` or `WAITING_FOR_ANSWER` → `REPORT_GENERATION`
   when the time limit is reached. From `NEXT_DECISION` the interviewer uses `FINISH`. `PAUSED` has
   no such edge: a paused interview's clock is stopped. `END_INTERVIEW` is unchanged.
+- `FINISH` from `ASKING` → `REPORT_GENERATION`: only with `NO_ELIGIBLE_TOPIC`, and only while no
+  question has been asked (both enforced by `apply_event`). Used when every planned topic lost a
+  cited fact before the interview's first question. No client action can reach it.
 - **Finish reason** (`finish_reason`, set only by the state machine): `END_INTERVIEW` →
   `CANDIDATE_ENDED`, `TIME_EXPIRED` → `TIME_LIMIT`, and `FINISH` must carry `PLAN_COMPLETED` or
-  `TIME_LIMIT` (anything else raises). Sessions finished before Phase 7 keep `NULL`.
+  `TIME_LIMIT` from `NEXT_DECISION`, `NO_ELIGIBLE_TOPIC` from `ASKING` (anything else raises).
+  Sessions finished before Phase 7 keep `NULL`.
 - **Active-time clock** (database time): `START_INTERVIEW` and `RESUME` start it; `PAUSE` and every
   move into `REPORT_GENERATION` add the running time to `active_seconds` and stop it.
 - Through the API a session now runs from `READY` to `REPORT_GENERATION` (see
@@ -708,7 +712,8 @@ POST .../answers   (explicit length check before the lock) → row lock · repla
 
 1. Time limit reached, or a question would start with **less than 60 s** left → finish
    `TIME_LIMIT` (exactly 60.0 s left still starts one).
-2. No question yet → the first valid topic.
+2. No question yet → the first valid topic. If none is valid (every topic's cited facts were
+   withdrawn or edited after planning) → finish `NO_ELIGIBLE_TOPIC`, with no model call.
 3. Last answer `CLARIFY` and fewer than 2 rephrases in this chain → `REPHRASE`.
 4. `CLARIFY` beyond the limit, `SKIP`, `DONT_KNOW` → next topic.
 5. Last answer `ANSWER`, fewer than 2 follow-ups, topic time not used up → `FOLLOW_UP`.
@@ -763,7 +768,8 @@ consent.
 
 - **`evaluation_status = NOT_EVALUATED`**: the answer is stored and has **not** been evaluated.
   No score, rubric result, evidence or missing-concept analysis exists yet (Phase 8).
-- **Finish reasons:** `PLAN_COMPLETED`, `TIME_LIMIT`, `CANDIDATE_ENDED`. The session stays in
+- **Finish reasons:** `PLAN_COMPLETED`, `TIME_LIMIT`, `CANDIDATE_ENDED`, `NO_ELIGIBLE_TOPIC`
+  (no topic could be asked at all; see Decisions). The session stays in
   `REPORT_GENERATION` until Phase 9; nothing reports a report as ready.
 - **Late answers:** once the limit is reached the answer is refused with
   `409 {"detail": "The interview time limit was reached, so this answer was not saved."}` and is
@@ -780,7 +786,7 @@ consent.
 |---|---|---|
 | `PUT /api/interview-sessions/{id}/ai-consent` `{"granted": bool}` | `200 {session_id, granted, changed_at}` (a repeat changes nothing) | `404` · `409` granting after `COMPLETED` · `422` |
 | `GET /api/interview-sessions/{id}/ai-consent` | `200 {session_id, granted, history[{granted, changed_at}]}` | `404` |
-| `POST /api/interview-sessions/{id}/questions/next` `{}` | `200 {session_id, status, finish_reason, ai_consent, question, progress{topics_total, time_remaining_seconds, deadline_reached}, model_calls}`: a new question, the open one again (no model call), or `question: null` with the finish reason | `404` · `409` not started / `"Resume the interview first."` / `"Your approved profile changed. Please try again."` · `422` any body field · `503` |
+| `POST /api/interview-sessions/{id}/questions/next` `{}` | `200 {session_id, status, finish_reason, ai_consent, question, progress{topics_total, time_remaining_seconds, deadline_reached}, model_calls}`: a new question, the open one again (no model call), or `question: null` with the finish reason (`NO_ELIGIBLE_TOPIC` included) | `404` · `409` not started / `"Resume the interview first."` / `"Your approved profile changed. Please try again."` (a fact changed during a model call; the retry skips that topic) · `422` any body field · `503` |
 | `POST /api/interview-sessions/{id}/answers` `{"question_id", "kind", "text"}` | `200 {session_id, status, question}` (stored → `NEXT_DECISION`, or an identical replay) | `404` · `409` late answer / answered differently / not waiting · `422` (`kind` = `ANSWER` needs text; length) · `503` |
 | `GET /api/interview-sessions/{id}/questions` | `200 {session_id, status, finish_reason, progress, questions[]}` | `404` |
 
@@ -895,3 +901,4 @@ Adding a model:
 | `e5813b741341` | Create `interview_sessions` (one unfinished session per candidate) |
 | `b8d14f2a9c63` | Add `interview_sessions.plan` + `plan_provider_call_id`, CHECKs `plan_matches_status` / `plan_is_object`; allow `INTERVIEW_PLANNING` calls. Downgrade **refuses** while any plan exists (it would delete them) and deletes planning-call metadata |
 | `178659f38d45` | Interviewer: session `ai_consent`, `active_seconds`, `active_since`, `finish_reason` (CHECKed, only on finished sessions); `interview_consent_events`; `interview_questions` (≤ 2 follow-ups, ≤ 2 rephrases, one open question per session, answers ≤ 10,000 characters, `NOT_EVALUATED` only); allow `QUESTION_GENERATION` calls. Downgrade **refuses** while questions or consent changes exist |
+| `3871903c395d` | Allow finish reason `NO_ELIGIBLE_TOPIC`. Downgrade **refuses** while a session has it (no older reason is true for it) |

@@ -29,6 +29,9 @@ class FinishReason(StrEnum):
     PLAN_COMPLETED = "PLAN_COMPLETED"  # no valid topic left
     TIME_LIMIT = "TIME_LIMIT"  # deadline reached, or too little time left to start a question
     CANDIDATE_ENDED = "CANDIDATE_ENDED"  # END_INTERVIEW
+    # Before the first question, every planned topic depends on a fact that is no longer approved
+    # and unchanged (D8), so no question can be asked. Never used once a question was asked.
+    NO_ELIGIBLE_TOPIC = "NO_ELIGIBLE_TOPIC"
 
 
 class RulesReason(StrEnum):

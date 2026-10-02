@@ -278,7 +278,9 @@ def decide(ctx: TurnContext) -> Intent:
 
 def next_topic(ctx: TurnContext) -> Step:
     """The next valid topic, in plan order, with its first template that is not a duplicate;
-    finish (PLAN_COMPLETED) when none is left. The template is used verbatim (D12)."""
+    finish when none is left: PLAN_COMPLETED, or NO_ELIGIBLE_TOPIC if nothing was asked yet
+    (then no template can be a duplicate, so every topic lost a cited fact, D8). The template is
+    used verbatim (D12)."""
     after = ctx.last.topic_position if ctx.last else 0
     asked = [q.text for q in ctx.history]
     ai_plan = ctx.plan.source == PlanSource.AI
@@ -291,7 +293,7 @@ def next_topic(ctx: TurnContext) -> Step:
                 return Step(K.TOPIC, topic_position=topic.position, text=template,
                             source=QuestionSource.AI if ai_plan else QuestionSource.RULES,
                             rules_reason=None if ai_plan else ctx.plan.rules_reason)
-    return Step(None, FinishReason.PLAN_COMPLETED)
+    return Step(None, FinishReason.PLAN_COMPLETED if ctx.history else FinishReason.NO_ELIGIBLE_TOPIC)
 
 
 def vocabulary(ctx: TurnContext) -> list[str]:
@@ -663,11 +665,11 @@ def _record_alone(db: Session, records: list[CallRecord]) -> None:
 def _apply(db: Session, session: InterviewSession, ctx: TurnContext, step: Step,
            records: list[CallRecord], call_id: uuid.UUID | None = None) -> TurnOutcome:
     if step.kind is None:
-        if session.status == S.ASKING:
-            # No valid topic before the first question (every cited fact withdrawn). There is no
-            # ASKING -> REPORT_GENERATION edge for a completed plan (Q1): report, don't invent one.
-            raise TurnNotAllowed(PROFILE_CHANGED)
-        apply_event(db, session.id, E.FINISH, finish_reason=step.finish_reason)
+        if session.status == S.ASKING and step.finish_reason == FinishReason.TIME_LIMIT:
+            # The reserve was reached between enforce_deadline and decide (§6.3 edge from ASKING)
+            apply_event(db, session.id, E.TIME_EXPIRED)
+        else:  # from ASKING only NO_ELIGIBLE_TOPIC, which the state machine enforces
+            apply_event(db, session.id, E.FINISH, finish_reason=step.finish_reason)
         logger.info("Interview session %s finished: %s", session.id, step.finish_reason)
         return _outcome(db, session, ctx.plan, records)
     if session.status == S.NEXT_DECISION:

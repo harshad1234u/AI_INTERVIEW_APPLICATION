@@ -508,6 +508,7 @@ def test_one_open_question_and_unique_seq(db_session: Session) -> None:
     ("WAITING_FOR_ANSWER", "TIME_LIMIT", "ck_interview_sessions_finish_reason_only_when_finished"),
     ("NEXT_DECISION", "PLAN_COMPLETED", "ck_interview_sessions_finish_reason_only_when_finished"),
     ("REPORT_GENERATION", "MODEL_DECIDED", "ck_interview_sessions_finish_reason"),
+    ("ASKING", "NO_ELIGIBLE_TOPIC", "ck_interview_sessions_finish_reason_only_when_finished"),
 ])
 def test_finish_reason_is_checked(db_session: Session, status: str, reason: str,
                                   constraint: str) -> None:  # F3
@@ -596,4 +597,61 @@ def test_interviewer_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {INTERVIEWER_REVISION}
+    assert _current_heads() == {HEAD} == {FINISH_REASON_REVISION}
+
+
+# ---------- NO_ELIGIBLE_TOPIC finish reason (Decision A) ----------
+
+FINISH_REASON_REVISION = "3871903c395d"
+
+
+def test_no_eligible_topic_is_a_stored_finish_reason(db_session: Session) -> None:
+    for status in ("REPORT_GENERATION", "COMPLETED"):
+        db_session.execute(text(
+            "INSERT INTO interview_sessions (candidate_id, status, plan, finish_reason) "
+            "VALUES (:c, :s, CAST('{}' AS jsonb), 'NO_ELIGIBLE_TOPIC')"),
+            {"c": _candidate(db_session, f"{uuid.uuid4().hex}@example.com"), "s": status})
+
+
+@pytest.fixture
+def committed_no_eligible_topic() -> Iterator[None]:
+    with engine.begin() as conn:
+        cid = conn.scalar(insert(Candidate).values(
+            email=f"{uuid.uuid4().hex}@example.com", name="Downgrade").returning(Candidate.id))
+        conn.execute(text("INSERT INTO interview_sessions (candidate_id, status, plan, "
+                          "finish_reason) VALUES (:c, 'REPORT_GENERATION', CAST('{}' AS jsonb), "
+                          "'NO_ELIGIBLE_TOPIC')"), {"c": cid})
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+def test_finish_reason_downgrade_refuses_while_a_session_uses_it(
+    committed_no_eligible_topic: None,
+) -> None:
+    with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 interview session"):
+        command.downgrade(Config(str(ALEMBIC_INI)), INTERVIEWER_REVISION)
+    assert _current_heads() == {HEAD}
+    with engine.connect() as conn:  # nothing was changed or lost
+        assert conn.scalar(text("SELECT count(*) FROM interview_sessions "
+                                "WHERE finish_reason = 'NO_ELIGIBLE_TOPIC'")) == 1
+
+
+def test_finish_reason_revision_downgrades_and_re_upgrades_cleanly() -> None:
+    cfg = Config(str(ALEMBIC_INI))
+    command.downgrade(cfg, INTERVIEWER_REVISION)
+    try:
+        assert _current_heads() == {INTERVIEWER_REVISION}
+        with pytest.raises(IntegrityError) as exc, engine.begin() as conn:  # rolled back
+            cid = conn.scalar(insert(Candidate).values(
+                email=f"{uuid.uuid4().hex}@example.com", name="Old").returning(Candidate.id))
+            conn.execute(text("INSERT INTO interview_sessions (candidate_id, status, plan, "
+                              "finish_reason) VALUES (:c, 'REPORT_GENERATION', "
+                              "CAST('{}' AS jsonb), 'NO_ELIGIBLE_TOPIC')"), {"c": cid})
+        assert exc.value.orig.diag.constraint_name == "ck_interview_sessions_finish_reason"
+    finally:
+        command.upgrade(cfg, "head")
+    command.check(cfg)
+    assert _current_heads() == {HEAD} == {FINISH_REASON_REVISION}

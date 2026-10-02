@@ -4,6 +4,7 @@ Covers the deterministic and AI paths, the deadline and late answers, D5, consen
 facts changing during a call, replays, real concurrency on committed data, recovery and privacy.
 """
 
+import contextlib
 import json
 import logging
 import threading
@@ -417,6 +418,107 @@ def test_a_withdrawn_project_topic_is_skipped(
     assert sorted(set(positions)) == [1, 2, 4, 5]  # TrustLens (3) skipped
 
 
+# ---------- no eligible first topic (Decision A) ----------
+
+DEEP_DIVE = {"mode": "PROJECT_DEEP_DIVE"}  # every topic cites a project: all can lose their fact
+
+
+def reject(db: Session, *fact_ids: object) -> None:
+    db.execute(text("UPDATE candidate_facts SET status = 'REJECTED' WHERE id = ANY(:i)"),
+               {"i": list(fact_ids)})
+    db.commit()
+
+
+@pytest.fixture
+def deep_dive(client: TestClient, sid: str, candidate: str, facts: list,
+              db_session: Session) -> tuple[str, list]:
+    """A started project deep dive on TrustLens and Campus Connect. Yields (session, fact ids)."""
+    [campus] = add_facts(db_session, candidate, (FC.PROJECT, "Campus Connect", FactStatus.APPROVED))
+    res = client.post(f"/api/interview-sessions/{sid}/plan", json={**SETTINGS, **DEEP_DIVE})
+    assert [t["topic"] for t in res.json()["plan"]["topics"]] == [
+        "Project: Campus Connect", "Project: TrustLens"]
+    assert act(client, sid, "START_INTERVIEW").json()["status"] == "ASKING"
+    return sid, [campus, facts[0]]
+
+
+def test_all_topics_eligible_asks_the_first(client: TestClient, deep_dive) -> None:
+    session_id, _ = deep_dive
+    q = first_question(client, session_id)
+    assert (q["kind"], q["topic_position"], q["text"]) == (
+        "TOPIC", 1, "Explain the architecture of Campus Connect.")
+
+
+def test_an_ineligible_first_topic_is_passed_over(
+    client: TestClient, deep_dive, db_session: Session
+) -> None:
+    session_id, (campus, _) = deep_dive
+    reject(db_session, campus)
+    q = first_question(client, session_id)
+    assert (q["kind"], q["topic_position"], q["topic"]) == ("TOPIC", 2, "Project: TrustLens")
+
+
+def test_no_eligible_first_topic_ends_the_interview(
+    client: TestClient, deep_dive, db_session: Session, use_gateway,
+    caplog: pytest.LogCaptureFixture
+) -> None:
+    session_id, fact_ids = deep_dive
+    consented(client, session_id)
+    provider = FakeProvider("groq", {"question": "unused?", "anchor": "unused"})
+    use_gateway(make_gateway(provider))  # consent and a model: still decided by code alone
+    reject(db_session, *fact_ids)
+    caplog.set_level(logging.INFO)
+    for _ in range(3):  # the first request ends it; repeats just report it
+        res = nxt(client, session_id)
+        assert res.status_code == 200
+        body = res.json()
+        assert (body["status"], body["finish_reason"], body["question"], body["model_calls"]) == (
+            "REPORT_GENERATION", "NO_ELIGIBLE_TOPIC", None, [])
+    assert caplog.text.count("-> REPORT_GENERATION on FINISH (NO_ELIGIBLE_TOPIC)") == 1
+    assert provider.calls == [] and calls(db_session) == 0
+    assert answers(db_session, session_id) == []  # no question row
+    status, reason, seconds = state(db_session, session_id)
+    assert (status, reason) == ("REPORT_GENERATION", "NO_ELIGIBLE_TOPIC") and seconds < 60
+    history = client.get(f"/api/interview-sessions/{session_id}/questions").json()
+    assert (history["finish_reason"], history["questions"]) == ("NO_ELIGIBLE_TOPIC", [])
+    for action in ("PAUSE", "END_INTERVIEW"):  # the candidate cannot change the finish
+        assert act(client, session_id, action).status_code == 409
+    assert state(db_session, session_id)[:2] == ("REPORT_GENERATION", "NO_ELIGIBLE_TOPIC")
+
+
+def test_no_eligible_topic_after_a_question_is_a_completed_plan(
+    client: TestClient, deep_dive, db_session: Session
+) -> None:
+    session_id, fact_ids = deep_dive
+    q = first_question(client, session_id)
+    reject(db_session, *fact_ids)  # withdrawn after the interview really started
+    ans(client, session_id, q["id"])
+    res = nxt(client, session_id).json()
+    assert (res["status"], res["finish_reason"], res["question"]) == (
+        "REPORT_GENERATION", "PLAN_COMPLETED", None)
+
+
+def test_time_limit_still_wins_over_no_eligible_topic(
+    client: TestClient, deep_dive, db_session: Session
+) -> None:
+    session_id, fact_ids = deep_dive
+    reject(db_session, *fact_ids)
+    run_for(db_session, session_id, 850)  # inside the reserve
+    res = nxt(client, session_id).json()
+    assert (res["status"], res["finish_reason"]) == ("REPORT_GENERATION", "TIME_LIMIT")
+
+
+def test_reserve_reached_while_deciding_from_asking_expires(
+    client: TestClient, started: str, monkeypatch: pytest.MonkeyPatch
+) -> None:  # the §6.3 edge from ASKING, not a "profile changed" 409
+    import app.services.interviewer as interviewer
+
+    monkeypatch.setattr(interviewer, "decide",
+                        lambda ctx: interviewer.Intent(interviewer.Action.FINISH, "TIME_LIMIT"))
+    res = nxt(client, started)
+    assert res.status_code == 200
+    assert (res.json()["status"], res.json()["finish_reason"]) == ("REPORT_GENERATION", "TIME_LIMIT")
+
+
 # ---------- the AI path (A1 AI, K2-K4, N11a, R-series at the API) ----------
 
 
@@ -672,32 +774,45 @@ class GatedProvider:
         return RawCompletion(text=json.dumps(self.output), model=self.model, finish_reason="stop")
 
 
-@pytest.fixture
-def committed_interview() -> Iterator[uuid.UUID]:
-    """A started interview (RULES plan, consent granted) committed for real; cleaned up after."""
+@contextlib.contextmanager
+def _committed(**overrides: object) -> Iterator[tuple[uuid.UUID, list]]:
+    """A started interview (RULES plan, consent granted) on TrustLens, committed for real; cleaned
+    up after. Yields (session id, project fact ids)."""
     with SessionLocal() as db:
         cand = Candidate(email=f"{uuid.uuid4().hex}@example.com", name="Concurrency Test")
         db.add(cand)
         db.commit()
-        add_facts(db, cand.id, (FC.PROJECT, "TrustLens", FactStatus.APPROVED))
+        fact_ids = add_facts(db, cand.id, (FC.PROJECT, "TrustLens", FactStatus.APPROVED))
         session = create_session(db, cand.id)
         db.commit()
         apply_event(db, session.id, E.CONFIRM_PROFILE)
-        plan = fallback_plan(PlanSettings(**SETTINGS), approved_facts(db, cand.id),
-                             RulesReason.NOT_REQUESTED)
+        plan = fallback_plan(PlanSettings(**{**SETTINGS, **overrides}),
+                             approved_facts(db, cand.id), RulesReason.NOT_REQUESTED)
         apply_event(db, session.id, E.PLAN_READY, plan=plan.model_dump(mode="json"))
         apply_event(db, session.id, E.START_INTERVIEW)
         db.commit()
         ids = (cand.id, session.id)
     consented(TestClient(app), ids[1])
     try:
-        yield ids[1]
+        yield ids[1], fact_ids
     finally:
         app.dependency_overrides.pop(get_model_gateway, None)
         with SessionLocal() as db:
             db.execute(text("DELETE FROM candidates WHERE id = :i"), {"i": ids[0]})
             db.execute(text("DELETE FROM provider_calls WHERE model = 'gated-interviewer'"))
             db.commit()
+
+
+@pytest.fixture
+def committed_interview() -> Iterator[uuid.UUID]:
+    with _committed() as (session_id, _):
+        yield session_id
+
+
+@pytest.fixture
+def committed_deep_dive() -> Iterator[tuple[uuid.UUID, list]]:
+    with _committed(**DEEP_DIVE) as ids:
+        yield ids
 
 
 def in_threads(n: int, fn) -> tuple[list[threading.Thread], list]:
@@ -844,3 +959,46 @@ def test_end_and_a_late_answer_race_to_one_finish_reason(committed_interview: uu
     assert late.status_code == 409 and results[0].status_code == 409
     with SessionLocal() as db:
         assert state(db, sid_)[:2] == ("REPORT_GENERATION", "TIME_LIMIT")
+
+
+def test_concurrent_requests_end_an_ineligible_interview_once(
+    committed_deep_dive: tuple, caplog: pytest.LogCaptureFixture
+) -> None:  # Decision A
+    sid_, fact_ids = committed_deep_dive
+    with SessionLocal() as db:
+        reject(db, *fact_ids)
+    caplog.set_level(logging.INFO)
+    threads, results = in_threads(4, lambda: nxt(TestClient(app), sid_))
+    for thread in threads:
+        thread.join(30)
+    assert [(r.status_code, r.json()["status"], r.json()["finish_reason"], r.json()["question"])
+            for r in results] == [(200, "REPORT_GENERATION", "NO_ELIGIBLE_TOPIC", None)] * 4
+    assert caplog.text.count("-> REPORT_GENERATION on FINISH (NO_ELIGIBLE_TOPIC)") == 1
+    with SessionLocal() as db:
+        assert state(db, sid_)[:2] == ("REPORT_GENERATION", "NO_ELIGIBLE_TOPIC")
+        assert answers(db, sid_) == []
+
+
+def test_a_withdrawal_racing_the_first_question_is_seen_after_the_lock(
+    committed_deep_dive: tuple
+) -> None:  # Decision A: facts are read under the session lock, never before it
+    sid_, fact_ids = committed_deep_dive
+    withdrawal = SessionLocal()
+    try:
+        withdrawal.execute(text("SELECT id FROM interview_sessions WHERE id = :i FOR UPDATE"),
+                           {"i": sid_})
+        withdrawal.execute(text("UPDATE candidate_facts SET status = 'REJECTED' "
+                                "WHERE id = ANY(:i)"), {"i": fact_ids})
+        threads, results = in_threads(2, lambda: nxt(TestClient(app), sid_))
+        for thread in threads:
+            thread.join(0.5)
+            assert thread.is_alive()  # both wait behind the lock
+        withdrawal.commit()
+        for thread in threads:
+            thread.join(30)
+    finally:
+        withdrawal.close()
+    assert [(r.status_code, r.json()["finish_reason"], r.json()["question"]) for r in results] == [
+        (200, "NO_ELIGIBLE_TOPIC", None)] * 2
+    with SessionLocal() as db:
+        assert answers(db, sid_) == []

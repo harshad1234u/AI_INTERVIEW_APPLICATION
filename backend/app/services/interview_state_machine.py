@@ -15,10 +15,11 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.models.interview_question import InterviewQuestion
 from app.models.interview_session import (
     ONE_ACTIVE_SESSION_INDEX,
     FinishReason,
@@ -84,6 +85,9 @@ TRANSITIONS: dict[tuple[InterviewStatus, SessionEvent], InterviewStatus] = {
     (S.NEXT_DECISION, E.NEXT_TOPIC): S.ASKING,
     (S.NEXT_DECISION, E.REPHRASE): S.ASKING,
     (S.NEXT_DECISION, E.FINISH): S.REPORT_GENERATION,
+    # Only with NO_ELIGIBLE_TOPIC and before any question (see FINISH_REASONS): every topic's
+    # facts were withdrawn after planning, so the interview cannot start.
+    (S.ASKING, E.FINISH): S.REPORT_GENERATION,
     (S.REPORT_GENERATION, E.REPORT_READY): S.COMPLETED,
     # PRD §61 recovery: only while the candidate holds the turn and no system work is in flight,
     # so RESUME always knows where to return.
@@ -97,8 +101,12 @@ TRANSITIONS: dict[tuple[InterviewStatus, SessionEvent], InterviewStatus] = {
     (S.ASKING, E.TIME_EXPIRED): S.REPORT_GENERATION,
     (S.WAITING_FOR_ANSWER, E.TIME_EXPIRED): S.REPORT_GENERATION,
 }
-# FINISH must say why; the other ways into REPORT_GENERATION imply it.
-FINISH_REASONS = (FinishReason.PLAN_COMPLETED, FinishReason.TIME_LIMIT)
+# FINISH must say why, and the reason depends on where it starts; the other ways into
+# REPORT_GENERATION imply it.
+FINISH_REASONS = {
+    S.NEXT_DECISION: (FinishReason.PLAN_COMPLETED, FinishReason.TIME_LIMIT),
+    S.ASKING: (FinishReason.NO_ELIGIBLE_TOPIC,),  # and only while no question exists
+}
 IMPLIED_FINISH_REASON = {E.END_INTERVIEW: FinishReason.CANDIDATE_ENDED,
                          E.TIME_EXPIRED: FinishReason.TIME_LIMIT}
 
@@ -176,16 +184,18 @@ def apply_event(
 
     PLAN_READY must carry the validated plan, written in the same flush as READY (the database
     rejects one without the other); no other event may carry one. Likewise FINISH must carry its
-    reason (PLAN_COMPLETED or TIME_LIMIT), and only FINISH takes one.
+    reason, and only FINISH takes one: PLAN_COMPLETED or TIME_LIMIT from NEXT_DECISION,
+    NO_ELIGIBLE_TOPIC from ASKING while no question has been asked.
 
     Also keeps the active-time clock, in database time: START_INTERVIEW and RESUME start it; PAUSE
     and every move into REPORT_GENERATION add the running time to active_seconds and stop it.
     """
     if (event == E.PLAN_READY) != (plan is not None):
         raise ValueError("PLAN_READY needs the validated plan, and only PLAN_READY takes one")
-    if (event == E.FINISH) != (finish_reason is not None) or (
-            finish_reason is not None and finish_reason not in FINISH_REASONS):
-        raise ValueError("FINISH needs PLAN_COMPLETED or TIME_LIMIT, and only FINISH takes a reason")
+    if (event == E.FINISH) != (finish_reason is not None) or (finish_reason is not None and not any(
+            finish_reason in reasons for reasons in FINISH_REASONS.values())):
+        raise ValueError("FINISH needs PLAN_COMPLETED, TIME_LIMIT or NO_ELIGIBLE_TOPIC, and only "
+                         "FINISH takes a reason")
     session = db.scalar(
         select(InterviewSession)
         .where(InterviewSession.id == session_id)
@@ -198,6 +208,9 @@ def apply_event(
         raise SessionNotFound(session_id)
     old = session.status
     new = next_status(old, event)
+    if event == E.FINISH and (finish_reason not in FINISH_REASONS[old] or (
+            old == S.ASKING and _any_question_asked(db, session.id))):
+        raise InvalidTransition(old, f"{event} ({finish_reason})")
     if event == E.CONFIRM_PROFILE:
         _require_reviewed_profile(db, session.candidate_id)
     session.status = new
@@ -220,6 +233,10 @@ def apply_event(
     logger.info("Interview session %s: %s -> %s on %s%s", session.id, old, new, event,
                 f" ({session.finish_reason})" if new == S.REPORT_GENERATION else "")
     return session
+
+
+def _any_question_asked(db: Session, session_id: uuid.UUID) -> bool:
+    return db.scalar(select(exists().where(InterviewQuestion.session_id == session_id)))
 
 
 def _require_reviewed_profile(db: Session, candidate_id: uuid.UUID) -> None:
