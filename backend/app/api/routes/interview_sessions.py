@@ -36,6 +36,7 @@ from app.schemas.evaluation import (
 from app.schemas.interview_session import (
     InterviewSessionCreate,
     InterviewSessionResponse,
+    RetryRequest,
     SessionActionRequest,
 )
 from app.schemas.interview_turn import (
@@ -72,6 +73,7 @@ from app.services.evaluator import (
     session_evaluations,
 )
 from app.services.report import NOT_GENERATED, ReportNotAllowed, complete_report, session_report
+from app.services.retry import RetryNotAllowed, create_retry
 from app.services.interviewer import (
     ConsentNotAllowed,
     LateAnswer,
@@ -152,14 +154,18 @@ def create_interview_session(
         session = create_session(db, candidate.id)
     except ActiveSessionExists as exc:
         db.rollback()
-        detail = "This candidate already has an unfinished interview session"
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            f"{detail}: {exc.session_id}. Resume it, or delete it to start again."
-            if exc.session_id else f"{detail}. Please try again.",
-        ) from None
+        raise _active_session_conflict(exc) from None
     _commit(db)
     return session
+
+
+def _active_session_conflict(exc: ActiveSessionExists) -> HTTPException:
+    detail = "This candidate already has an unfinished interview session"
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        f"{detail}: {exc.session_id}. Resume it, or delete it to start again."
+        if exc.session_id else f"{detail}. Please try again.",
+    )
 
 
 @router.get("/interview-sessions/{session_id}", response_model=InterviewSessionResponse)
@@ -509,3 +515,29 @@ def read_report(
         raise HTTPException(status.HTTP_409_CONFLICT, NOT_GENERATED)  # D11
     return ReportResult(session_id=session.id, status=session.status,
                         report=session_report(db, session))
+
+
+# ---------- retry (Phase 10) ----------
+
+
+@router.post("/interview-sessions/{session_id}/retry", response_model=InterviewPlanView,
+             status_code=status.HTTP_201_CREATED)
+def retry_interview_session(
+    session_id: uuid.UUID, body: RetryRequest, db: Session = Depends(get_db)
+) -> InterviewPlanView:
+    """A new READY session, for the same candidate, with the completed interview's topics to
+    practise whose facts are still valid, copied word for word. No model call; the source is
+    not changed."""
+    try:
+        session, plan = create_retry(db, session_id)
+    except SessionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
+    except ActiveSessionExists as exc:
+        db.rollback()
+        raise _active_session_conflict(exc) from None
+    except (RetryNotAllowed, ProfileNotReviewed) as exc:
+        db.rollback()  # nothing was written; this releases the row lock
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    _commit(db)
+    return InterviewPlanView(session_id=session.id, status=session.status, plan=plan)

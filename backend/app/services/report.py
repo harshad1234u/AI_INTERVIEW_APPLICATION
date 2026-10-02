@@ -36,6 +36,7 @@ from app.schemas.report import (
     PractiseCriterion,
     ReportQuestion,
     ReportSummary,
+    RetryAvailability,
     TopicCoverage,
     TopicToPractise,
     ToPractise,
@@ -92,7 +93,11 @@ SCORE_MEANING = {1: "not shown", 2: "slightly", 3: "partly", 4: "mostly", 5: "cl
 SCORE_SCALE = {**{str(k): v for k, v in SCORE_MEANING.items()}, "null": "too little to judge"}
 SHOWN_CLEARLY, TO_PRACTISE = (4, 5), (1, 2)  # 3 and null are in neither list (R1)
 SPEECH_METRICS = Unavailable(note="Speech metrics are not available: answers were given as text.")
-RETRY = Unavailable(note="Retrying questions is not available yet.")
+# Phase 10: true exactly when there is a topic to practise. Whether its facts are still valid is
+# checked when the retry is requested, not here.
+RETRY = RetryAvailability(available=True, note="You can retry the topics to practise in a new "
+                                                "interview.")
+NO_RETRY = RetryAvailability(available=False, note="Nothing to retry.")
 LIMITATIONS = (
     "This is practice feedback, not a hiring assessment. Scores are per criterion of a single "
     "answer and are never combined. AI evaluation can be wrong, and technical correctness was "
@@ -147,6 +152,7 @@ def build_report(session: InterviewSession, plan: InterviewPlan,
                                    concept=concept, practice=CONCEPT_PRACTICE.format(concept=concept))
                     for concept in row.missing_concepts]
 
+    topics_to_practise = _topics_to_practise(plan, low, missing)
     return InterviewReport(
         summary=summary,
         questions=[ReportQuestion(
@@ -167,9 +173,10 @@ def build_report(session: InterviewSession, plan: InterviewPlan,
                                        concepts_mentioned=row.concepts_mentioned)
                      for q, row in rows],
             speech_metrics=SPEECH_METRICS),
-        topics_to_practise=_topics_to_practise(plan, low, missing),
+        topics_to_practise=topics_to_practise,
         recommended_practice=_practice(low, missing),
-        retry=RETRY, score_scale=SCORE_SCALE, limitations=LIMITATIONS)
+        retry=RETRY if topics_to_practise else NO_RETRY,
+        score_scale=SCORE_SCALE, limitations=LIMITATIONS)
 
 
 def _status(q: InterviewQuestion) -> EvaluationStatus:

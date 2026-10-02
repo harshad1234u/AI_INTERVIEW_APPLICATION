@@ -42,6 +42,7 @@ from app.services.report import (
     NOT_ASKED,
     NOT_FINISHED,
     NOT_GENERATED,
+    NO_RETRY,
     PENDING,
     RETRY,
     SCORE_MEANING,
@@ -286,7 +287,9 @@ def test_communication_observations_are_stored_word_counts_only(
 
 def test_unavailable_sections_scale_and_limitations(reported: dict) -> None:
     r = reported["report"]
-    assert r["retry"] == {"available": False, "note": "Retrying questions is not available yet."}
+    # Phase 10: the only intended change to the report; a topic to practise makes retry available.
+    assert r["retry"] == {"available": True,
+                          "note": "You can retry the topics to practise in a new interview."}
     assert r["score_scale"] == {"1": "not shown", "2": "slightly", "3": "partly", "4": "mostly",
                                 "5": "clearly and fully", "null": "too little to judge"}
     assert r["limitations"] == LIMITATIONS
@@ -661,7 +664,7 @@ def test_no_model_or_gateway_in_the_report_code() -> None:
 
 FIXED_TEXT = [*FINISH_TEXT.values(), *ANSWER_NOTE.values(), NOT_ASKED,
               CONCEPT_PRACTICE.format(concept="hooks"), *CRITERION_PRACTICE.values(),
-              SPEECH_METRICS.note, RETRY.note, *SCORE_MEANING.values(), NOT_FINISHED, NOT_GENERATED,
+              SPEECH_METRICS.note, RETRY.note, NO_RETRY.note, *SCORE_MEANING.values(), NOT_FINISHED, NOT_GENERATED,
               PENDING.format(n=3)]
 
 

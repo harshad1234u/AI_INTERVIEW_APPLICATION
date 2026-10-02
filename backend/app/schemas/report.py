@@ -123,6 +123,13 @@ class Unavailable(BaseModel):
     note: str
 
 
+class RetryAvailability(BaseModel):
+    """Whether POST .../retry has topics to practise (Phase 10). The report never creates one."""
+
+    available: bool
+    note: str
+
+
 class AnswerObservation(BaseModel):
     question_id: uuid.UUID
     seq: int
@@ -158,7 +165,7 @@ class InterviewReport(BaseModel):
     communication_observations: CommunicationObservations
     topics_to_practise: list[TopicToPractise]
     recommended_practice: list[PracticeItem]
-    retry: Unavailable
+    retry: RetryAvailability
     score_scale: dict[str, str]  # the evaluator's 1-5 anchors, and "null"
     limitations: str
 

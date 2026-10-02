@@ -13,6 +13,12 @@ class InterviewSessionCreate(BaseModel):
     candidate_id: uuid.UUID
 
 
+class RetryRequest(BaseModel):
+    """Empty on purpose: the retried topics are decided by code from the report (Phase 10)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SessionActionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
