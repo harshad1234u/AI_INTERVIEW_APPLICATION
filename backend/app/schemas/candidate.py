@@ -23,11 +23,27 @@ Name = Annotated[
 Email = Annotated[EmailStr, AfterValidator(str.lower)]
 
 
-class CandidateCreate(BaseModel):
+# Length only: no composition rules (NIST SP 800-63B). The upper bound caps hashing work.
+PASSWORD_MIN_LENGTH, PASSWORD_MAX_LENGTH = 8, 128
+NewPassword = Annotated[
+    str, StringConstraints(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+]
+
+
+class RegisterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     email: Email
     name: Name
+    password: NewPassword
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: Email
+    # Any length policy is for new passwords; here only the hashing bound applies.
+    password: Annotated[str, StringConstraints(min_length=1, max_length=PASSWORD_MAX_LENGTH)]
 
 
 class PartialUpdate(BaseModel):

@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Comma-separated list of exact origins; wildcards are rejected.
     cors_origins: str = "http://localhost:3000"
     max_resume_size_mb: int = Field(default=5, ge=1, le=20)
+    # Marks the session cookie Secure (sent over HTTPS only). Turn on whenever the API is
+    # served over HTTPS; plain-HTTP local development needs it off.
+    auth_cookie_secure: bool = False
 
     # AI model gateway. Empty AI_PROVIDERS = AI disabled (resume processing still works).
     # Comma-separated, in order: the first is the primary, the rest are fallbacks.
