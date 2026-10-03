@@ -174,6 +174,7 @@ export function useExpressionCamera(): Camera {
     strikes.current = 0;
     running.current = true;
     setRecent([]);
+    if (question.current) entry(question.current).used = true;
     setState("active");
     timer.current = setTimeout(() => tick.current(), BASE_INTERVAL_MS);
   }, [fail, state, stopStream]);
@@ -197,6 +198,8 @@ export function useExpressionCamera(): Camera {
   const setQuestion = useCallback((id: string | null) => {
     question.current = id;
     if (id && failed.current) entry(id).failed = true;
+    // Shown while analysis runs: reported even with no sample ("insufficient visual data").
+    if (id && running.current) entry(id).used = true;
     setRecent([]);
   }, []);
 

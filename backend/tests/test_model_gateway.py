@@ -16,6 +16,7 @@ from app.ai.gateway import (
     ModelNotConfiguredError,
     ModelRequest,
     ModelUnavailableError,
+    ProviderError,
     RawCompletion,
 )
 from app.ai.providers import BASE_URLS, OpenAICompatibleProvider, build_gateway
@@ -455,3 +456,44 @@ async def test_gemini_gets_the_schema_without_bounds_and_the_gateway_still_enfor
     with pytest.raises(ModelUnavailableError) as exc:
         await gateway.generate_structured(req, PlanProposal)
     assert exc.value.record.error_type == ErrorKind.INVALID_OUTPUT
+
+
+# ---------- Retry-After on 429 (free tiers: several evaluations in a row) ----------
+
+
+@pytest.mark.parametrize(("header", "seconds"), [("2.5", 2.5), ("0", 0.0), (None, None),
+                                                 ("Wed, 21 Oct 2026 07:28:00 GMT", None)])
+async def test_adapter_reads_retry_after_on_429(header, seconds) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"retry-after": header} if header else {})
+
+    req = ModelRequest(ModelCapability.PROFILE_EXTRACTION, "I", "<d>D</d>", 0.0)
+    with pytest.raises(ProviderError) as exc:
+        await adapter("groq", handler).complete(req, Out.model_json_schema(), 512)
+    assert (exc.value.kind, exc.value.retry_after) == (ErrorKind.RATE_LIMITED, seconds)
+
+
+def limited(after: float) -> ProviderError:
+    return ProviderError(ErrorKind.RATE_LIMITED, "HTTP 429", retry_after=after)
+
+
+async def test_a_short_retry_after_is_waited_out_on_the_same_provider() -> None:
+    sleep = RecordingSleep()
+    primary, backup = FakeProvider("groq", limited(3.0), OK), FakeProvider("gemini", OK)
+    result = await make_gateway(primary, backup, sleep=sleep).generate_structured(REQUEST, Out)
+    assert (result.record.provider, sleep.delays, len(backup.calls)) == ("groq", [3.0], 0)
+
+
+async def test_a_long_retry_after_moves_to_the_next_provider_at_once() -> None:
+    sleep = RecordingSleep()
+    primary, backup = FakeProvider("groq", limited(3600.0)), FakeProvider("gemini", OK)
+    result = await make_gateway(primary, backup, sleep=sleep).generate_structured(REQUEST, Out)
+    assert (result.record.provider, sleep.delays, len(primary.calls)) == ("gemini", [], 1)
+
+
+async def test_a_retry_after_past_the_deadline_still_tries_the_next_provider() -> None:
+    import time
+    primary, backup = FakeProvider("groq", limited(8.0)), FakeProvider("gemini", OK)
+    result = await make_gateway(primary, backup).generate_structured(
+        REQUEST, Out, deadline=time.monotonic() + 5)
+    assert result.record.provider == "gemini"

@@ -89,6 +89,15 @@ def _status_kind(status: int, body: bytes) -> ErrorKind:
     return ErrorKind.BAD_REQUEST
 
 
+def _retry_after(res: httpx.Response) -> float | None:
+    """Retry-After in seconds (Groq sends it on 429); an HTTP date or anything odd is ignored."""
+    try:
+        seconds = float(res.headers.get("retry-after", ""))
+    except ValueError:
+        return None
+    return seconds if 0 <= seconds < 86_400 else None
+
+
 def _count(value: Any) -> int | None:
     # Reported usage only: anything missing or odd stays None rather than being guessed.
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
@@ -146,7 +155,8 @@ class OpenAICompatibleProvider:
             raise ProviderError(ErrorKind.CONNECTION) from None
         if res.status_code != 200:
             # Status code only: provider error bodies can echo the request content.
-            raise ProviderError(_status_kind(res.status_code, res.content), f"HTTP {res.status_code}")
+            raise ProviderError(_status_kind(res.status_code, res.content), f"HTTP {res.status_code}",
+                                retry_after=_retry_after(res) if res.status_code == 429 else None)
         try:
             body = res.json()
             choice = body["choices"][0]

@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 MAX_OUTPUT_CHARS = 200_000  # hard cap on raw text accepted from a provider
+# A provider's Retry-After up to this is waited out (a per-minute limit: free tiers hit it when
+# several answers are evaluated in a row); a longer one (a daily quota) moves on at once.
+RATE_LIMIT_WAIT_MAX = 10.0
 
 
 class ModelCapability(StrEnum):
@@ -53,9 +56,10 @@ RETRYABLE = {ErrorKind.TIMEOUT, ErrorKind.CONNECTION, ErrorKind.RATE_LIMITED,
 class ProviderError(Exception):
     """Raised by adapters. The message is a short code, never provider or user content."""
 
-    def __init__(self, kind: ErrorKind, detail: str = "") -> None:
+    def __init__(self, kind: ErrorKind, detail: str = "", retry_after: float | None = None) -> None:
         super().__init__(f"{kind}: {detail}" if detail else kind)
         self.kind, self.detail = kind, detail
+        self.retry_after = retry_after  # seconds the provider asked us to wait (429), if it said
 
 
 @dataclass(frozen=True)
@@ -199,12 +203,13 @@ class ModelGateway:
                     break
                 record.attempts += 1
                 attempt_started = time.monotonic()
+                retry_after: float | None = None
                 try:
                     with anyio.fail_after(timeout):
                         raw = await provider.complete(request, json_schema, max_tokens)
                     output = parse_structured(raw, schema)
                 except ProviderError as exc:
-                    kind, detail = exc.kind, exc.detail
+                    kind, detail, retry_after = exc.kind, exc.detail, exc.retry_after
                 except TimeoutError:
                     kind, detail = ErrorKind.TIMEOUT, ""
                 except Exception as exc:  # adapter bug: log the class only, try the next provider
@@ -226,8 +231,14 @@ class ModelGateway:
                 # Same request, same token limit: a truncated answer would just be truncated again.
                 if kind not in RETRYABLE or detail == "truncated" or retry == self.max_retries:
                     break
+                if retry_after is not None and retry_after > RATE_LIMIT_WAIT_MAX:
+                    break  # e.g. a daily quota: try the next provider now
                 backoff = min(self.backoff_base * 2**retry, self.backoff_max)
+                if retry_after is not None:
+                    backoff = max(backoff, retry_after)
                 if deadline is not None and time.monotonic() + backoff >= deadline:
+                    if retry_after is not None:
+                        break  # this provider can't answer in time; another one may
                     out_of_time = True
                     break
                 await self.sleep(backoff)
