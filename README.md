@@ -18,13 +18,17 @@ See [prd.md](prd.md) for the full product requirements.
 4. **Review the plan** (ordered topics, what each is based on) and **download or print** it.
 5. **Take the interview**: questions, adaptive follow-ups, "ask to rephrase", "I don't know",
    skip, pause and resume, a server-kept timer, recovery after a refresh or a dropped connection.
+   Optionally turn on the camera for an experimental, on-device **facial-expression
+   observation** (off by default; see [Camera](#optional-camera-observed-expression-signals)).
 6. **Get feedback**: each answer is evaluated against a rubric (criterion scores with quotes from
    the answer when AI is on, deterministic observations otherwise), then a **report** that never
    combines scores into one number. Download or print it.
 7. **Retry** the topics the report marks to practise, as a new interview, and see every attempt
    in the **interview history** (each with its own report).
 
-The product is a practice tool: no hiring decisions, no ranking, no emotion or personality scoring.
+The product is a practice tool: no hiring decisions, no ranking, no combined score. The optional
+camera observation describes visible expressions only; it is never a score, never feeds the
+evaluation, and never claims what the candidate felt.
 
 ### How the system is built
 
@@ -95,6 +99,7 @@ backend/
   app/api/routes/manual_facts.py  The candidate's own facts: list, add, edit, delete
   app/services/manual_facts.py    Cap and duplicate rules under the candidate row lock
   app/services/limits.py       Usage limits: per network, per candidate, global AI budget
+  app/services/expressions.py  Camera observation counts -> cautious report wording
   alembic/                     Migrations (reads DATABASE_URL via app settings)
   tests/                       pytest suite, runs against a separate test database
 frontend/
@@ -108,6 +113,8 @@ frontend/
   lib/profile.ts               Fact categories and the fact text rule; node --test
   lib/exportDoc.ts             Plan and report documents (escaped, script-free HTML); node --test
   lib/download.ts              Save or print a document (browser only)
+  lib/expressions.ts           Camera sampling, classification, pacing, wording; node --test
+  components/interview/useExpressionCamera.ts  Camera + on-device model (lazy), counts per question
 e2e/
   server.py                    The real backend with a deterministic fake model gateway
   journey.mjs                  Real-browser journey (headless Edge over CDP, 28 checks)
@@ -1261,6 +1268,25 @@ The plan screen and the report each offer **Download** and **Print or save as PD
   provider names or call metadata (tested; the E2E journey also opens both files in a browser
   and prints them to PDF).
 
+## Optional camera: observed expression signals
+
+> **Product decision (2026-10-04):** the PRD (§49 Camera Policy, §54, §66) excludes emotion and
+> facial-expression analysis. At the product owner's explicit request this experimental,
+> opt-in observation was added, within these limits: on-device only, off by default, counts
+> only, cautious wording, and never part of any score, feedback or decision.
+
+| | |
+|---|---|
+| Model | `@vladmandic/face-api` (MIT): tiny face detector + 7-class expression net (neutral, happy, sad, angry, fearful, disgusted, surprised), ~520 KB of weights in `frontend/public/models/face-api/` |
+| Where it runs | In the candidate's browser (TensorFlow.js, WebGL or CPU), loaded only after **Enable camera** |
+| What leaves the device | Per answered question: how many samples fell in each class, plus "no face" and "several faces" counts. Never an image, a frame, video, landmarks, probabilities or timestamps (the API refuses any other field) |
+| Stored | `question_expression_observations` (counts), deleted with the question, the interview or the account. Nothing is logged |
+| Sampling | About once a second while a question is open; every 3 s if inference is slow; turned off (the interview continues) when it stays over 1.5 s. Never while paused or the tab is hidden. Several faces are never analysed |
+| Report | "Observed expression signals": per question "Mostly neutral expression, with occasional smiling expression", "Mixed: …", "Insufficient visual data …", or "Unavailable"; no percentages; look-alike classes merged (angry/disgusted → "frowning"), named by appearance ("tense-looking", not "anxious"); a disclaimer; "Not available: the camera was not enabled" otherwise. The export includes it |
+| Never | Read by the interviewer, the evaluator, the report's criteria, topics to practise or retry (a test scans that code) |
+| Control | Enable / Disable at any time on the plan, interview and pause screens; the camera is released on Disable, on any failure, and when the interview screens are left |
+| Failures | Permission denied, no camera, camera in use or disconnected, unsupported browser, model load failure, a slow device, no face and several faces each show a plain message and the interview continues |
+
 ## Usage limits (abuse and cost controls)
 
 Deterministic, in PostgreSQL (`usage_counters`, `app/services/limits.py`): one
@@ -1317,13 +1343,16 @@ npm run build && npm run start
 node e2e/journey.mjs        # screenshots, downloads and results.json in e2e/out/
 ```
 
-The 28 checks walk a new candidate through registration, manual facts, a real resume (edit,
+The 37 checks walk a new candidate through registration, manual facts, a real resume (edit,
 reject, approve all, AI extraction with a discarded invented item), profile confirmation,
 planning with consent, the plan download and its PDF, follow-up, rephrase, pause with a draft,
 "I don't know", skip, a refresh, a dropped connection, a late answer after the deadline,
 evaluation, the report download and its PDF, a retry and its report, the history, logout and
 login, another account's 404s, a phone-sized screen, focus on screen changes, the sign-in
-throttle and empty browser storage. It deletes what it created.
+throttle and empty browser storage. Camera checks use Edge's fake webcam showing one face
+(generated by `e2e/camera_feeds.py` from the face-api package's demo photo; needs Pillow) and
+in-page streams for denied permission, no camera, several faces and no face, plus a blocked
+model. It deletes what it created.
 
 ## Live provider smoke test
 
@@ -1381,6 +1410,10 @@ enabling the application routes there:
   (PRD §63).
 - **Not built (PRD SHOULD/COULD):** voice and speech metrics, job-description upload, progress
   trends across attempts, learning mode, a multilingual UI, text-to-speech.
+- **Camera observation:** the expression model was trained on posed faces and is approximate,
+  with known accuracy differences across lighting, angles, glasses and faces; the 7 classes
+  cannot express uncertainty or confusion. In the headless test browser (no GPU) inference took
+  long enough to sample every 3 s; real devices with WebGL sample about once a second.
 - Closing the browser does not pause the interview (use Pause); an unsent answer is kept in the
   page only and is lost on reload.
 
@@ -1473,4 +1506,5 @@ Adding a model:
 | `5c0e1d2f7a91` | Authentication: `candidates.password_hash` (NULL = cannot log in), `failed_logins` (CHECK >= 0), `locked_until`; `auth_sessions` (SHA-256 token hash PK, `ON DELETE CASCADE` from candidates, indexed `candidate_id`, CHECK `expires_at > created_at`). Downgrade **refuses** while any candidate has a password; sessions are dropped |
 | `9d2e6f1a7c40` | Usage limits: `usage_counters` (PK `scope, key, window_start`, CHECK `count >= 1`, index on `expires_at`, no FK); rules reason `QUOTA_REACHED` on questions and evaluations. Downgrade **refuses** while any row uses `QUOTA_REACHED`; counters are dropped |
 | `b4c8e2d9f013` | Retry link: `interview_sessions.retry_of_id` (FK to the source, `ON DELETE SET NULL`, indexed, CHECK `retry_of_id <> id`). Downgrade **refuses** while a retry is linked |
+| `c5d1a7e3b920` | `question_expression_observations`: per answered question, 9 counts (CHECK 0–10000), status `ANALYZED` / `UNAVAILABLE` (unavailable has no counts), `ON DELETE CASCADE` from the question. Downgrade **refuses** while any exist |
 | `70b0b7891bc0` | Manual facts: `candidate_facts.source` allows `MANUAL`; resume provenance columns nullable only for manual facts (CHECK `provenance_matches_source`: a manual fact has none and is `APPROVED`, a resume fact has all); partial unique index `uq_candidate_facts_manual_fact` on `(candidate_id, category, lower(fact))`. Downgrade **refuses** while any manual fact exists |
