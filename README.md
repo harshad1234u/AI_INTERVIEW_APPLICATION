@@ -4,7 +4,11 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 11 (Text interview UI) — the browser now runs the whole interview at
+**Current status:** Phase 12 (Authentication and candidate isolation): email + password sign-in
+with server-side sessions in an HttpOnly cookie. Every route except the health check needs a
+signed-in candidate, and one candidate can never read or change another's data: a foreign id
+answers `404` (see [Authentication and access control](#authentication-and-access-control)).
+Builds on Phase 11 (Text interview UI): the browser runs the whole interview at
 `/interview`: profile confirmation, planning with explicit AI consent, questions and answers,
 pause/resume, feedback, the report and retry, all through the existing API (see
 [Text Interview UI](#text-interview-ui)). Builds on Phase 10 (Retry): `POST .../retry` turns a completed interview's topics to
@@ -24,9 +28,9 @@ processing with candidate review.
 > extraction runs only when a candidate clicks "Find more with AI" on a configured server, and
 > everything it suggests still needs the candidate's approval. See [Model Gateway](#model-gateway).
 
-> **Development only: there is no authentication yet.** Anyone who can reach the API and knows
-> a candidate's or resume's id can read, edit or delete it. See
-> [Access boundary](#access-boundary-no-authentication-yet).
+> **Production still serves only `/api/health`.** Authentication exists (Phase 12), but enabling
+> the application in production is a later phase. See
+> [Authentication and access control](#authentication-and-access-control).
 
 ## Architecture
 
@@ -44,6 +48,10 @@ SQLAlchemy models  →  PostgreSQL (constraints enforce the same invariants)
 backend/
   app/main.py                  App factory, CORS, 503 handler, router registration
   app/core/config.py           Typed settings loaded from environment / .env
+  app/core/security.py         scrypt password hashing, session tokens (stdlib only)
+  app/api/deps.py              current_candidate: the signed-in candidate, from the cookie
+  app/api/routes/auth.py       Register, login, logout, me
+  app/services/auth.py         Lockout, session create/lookup/delete
   app/db/base.py               Declarative Base + constraint naming convention
   app/db/session.py            Engine, session factory, get_db dependency
   app/models/                  SQLAlchemy models (candidate, resume, provider_call)
@@ -62,16 +70,18 @@ backend/
   app/services/retry.py                    Retry plan from the report's topics to practise
   app/api/routes/interview_sessions.py     Sessions, actions, planning, turns, evaluation
   app/api/routes/health.py     GET /api/health
-  app/api/routes/candidates.py Candidate CRUD
+  app/api/routes/candidates.py Read, edit and delete your own profile
   app/api/routes/resumes.py    Resume upload, facts review, delete
   alembic/                     Migrations (reads DATABASE_URL via app settings)
   tests/                       pytest suite, runs against a separate test database
 frontend/
-  app/                         Next.js App Router pages (/ and /interview)
-  components/                  BackendStatus, CandidateProfile, ResumeSection
+  app/                         Next.js App Router pages (/, /login and /interview)
+  components/                  AuthProvider, AccountBar, LoginForm, BackendStatus, CandidateProfile,
+                               ResumeSection
   components/interview/        Interview screens: flow, setup, turn, feedback, report
   lib/api.ts                   The only place that calls fetch (reads NEXT_PUBLIC_API_URL)
   lib/interview.ts             Pure UI logic (status → screen, labels, fixed copy); node --test
+  lib/auth.ts                  Pure auth rules (401 redirect, form validation); node --test
 ```
 
 ## Prerequisites
@@ -122,20 +132,30 @@ cp .env.example .env.local    # NEXT_PUBLIC_API_URL=http://localhost:8000
 npm run dev                   # http://localhost:3000
 ```
 
-The landing page shows a backend status indicator, the candidate profile form
-(create → view → edit → delete) and, once a profile exists, the resume upload and review card.
+`/login` logs in or creates an account. The landing page then shows who is signed in (with
+**Log out**), a backend status indicator, the profile (view → edit → delete) and the resume upload
+and review card. Signed-out visitors are sent to `/login`.
 
-## Candidate Profile API
+## Authentication API
 
 All errors return JSON `{"detail": ...}`. Database internals, SQL and driver messages are never
-returned to clients.
+returned to clients. The full design is
+[docs/phase-12-authentication-plan.md](docs/phase-12-authentication-plan.md).
 
-### `POST /api/candidates` → `201 Created`
+| Endpoint | Success | Errors |
+|---|---|---|
+| `POST /api/auth/register` `{name, email, password}` | `201` candidate, session cookie set | `409` email taken · `422` (password 8–128 chars) |
+| `POST /api/auth/login` `{email, password}` | `200` candidate, session cookie set | `401 {"detail": "Email or password is incorrect."}` (same for an unknown email) · `429` locked · `422` |
+| `POST /api/auth/logout` | `204`, session deleted, cookie cleared | — |
+| `GET /api/auth/me` | `200` the signed-in candidate | `401 {"detail": "Please log in."}` |
+
+From a shell, keep the cookie in a jar and send the allowed `Origin` on every write (the CSRF
+check refuses writes without it):
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/candidates \
-  -H "Content-Type: application/json" \
-  -d '{"name": "  Harshad  Ambi ", "email": "Harshad@Example.com"}'
+curl -c jar -b jar -H "Origin: http://localhost:3000" -H "Content-Type: application/json" \
+  -d '{"name": "  Harshad  Ambi ", "email": "Harshad@Example.com", "password": "a long passphrase"}' \
+  http://127.0.0.1:8000/api/auth/register
 ```
 
 ```json
@@ -147,6 +167,12 @@ curl -X POST http://127.0.0.1:8000/api/candidates \
 }
 ```
 
+## Candidate Profile API
+
+Candidates are created by `POST /api/auth/register` (there is no `POST /api/candidates`). These
+routes act on the signed-in candidate only: another candidate's id is `404`, exactly like an id
+that does not exist.
+
 ### `GET /api/candidates/{id}` → `200 OK`
 
 Returns the same shape as above. There is intentionally **no** "list all candidates" endpoint.
@@ -156,15 +182,16 @@ Returns the same shape as above. There is intentionally **no** "list all candida
 Partial update: only the fields you send change.
 
 ```bash
-curl -X PATCH http://127.0.0.1:8000/api/candidates/349f5aba-7c6e-4de2-99b6-02a2039aaa43 \
+curl -b jar -H "Origin: http://localhost:3000" -X PATCH \
+  http://127.0.0.1:8000/api/candidates/349f5aba-7c6e-4de2-99b6-02a2039aaa43 \
   -H "Content-Type: application/json" -d '{"name": "H. Ambi"}'
 ```
 
 ### `DELETE /api/candidates/{id}` → `204 No Content`
 
-Permanently deletes the candidate (hard delete), and with it every resume and extracted fact
-(`ON DELETE CASCADE`). Later phases attach sessions the same way, so this remains the single
-"delete my data" operation.
+Permanently deletes the candidate (hard delete), and with it every resume, extracted fact,
+interview session and sign-in session (`ON DELETE CASCADE`), and clears the cookie. This
+remains the single "delete my data" operation.
 
 ### Validation and errors
 
@@ -175,7 +202,8 @@ Permanently deletes the candidate (hard delete), and with it every resume and ex
 | `id`, `created_at`, or any unknown field in the body | `422` (they are server-controlled) |
 | `PATCH` with `{}` or a field set to `null` | `422` |
 | Email already used by another candidate (case-insensitive) | `409 {"detail": "A candidate with this email already exists"}` |
-| Unknown id | `404 {"detail": "Candidate not found"}` |
+| No valid session (missing, expired or logged out) | `401 {"detail": "Please log in."}` |
+| Unknown id, or another candidate's id | `404 {"detail": "Candidate not found"}` |
 | Malformed id (not a UUID) | `422` |
 | Database unreachable | `503 {"detail": "Service temporarily unavailable. Please try again."}` |
 
@@ -192,7 +220,7 @@ on failure.
 ### Flow
 
 ```text
-POST /api/resumes (multipart: candidate_id + file)
+POST /api/resumes (multipart: file; the candidate is the signed-in one)
   → validate: .pdf name, application/pdf type, size ≤ MAX_RESUME_SIZE_MB, not empty,
     content starts with %PDF-            (failures: 413 / 415 / 422, nothing stored)
   → parse in memory with pypdf           (no temp files; the client filename is never used)
@@ -285,7 +313,7 @@ and error class names only: never resume text, file names, names or emails (enfo
 
 | Method & path | Result |
 |---|---|
-| `POST /api/resumes` | `201` resume (any processing outcome) · `404` unknown candidate · `413` too large · `415` not a PDF · `422` empty/missing file or bad id |
+| `POST /api/resumes` | `201` resume (any processing outcome) for the signed-in candidate · `401` no session · `413` too large · `415` not a PDF · `422` empty/missing file |
 | `GET /api/candidates/{id}/resumes` | `200` that candidate's resumes, newest first |
 | `GET /api/resumes/{id}` | `200` resume |
 | `GET /api/resumes/{id}/facts` | `200` facts, grouped by category |
@@ -294,7 +322,7 @@ and error class names only: never resume text, file names, names or emails (enfo
 | `DELETE /api/resumes/{id}` | `204`; its facts are deleted too, approved ones included |
 
 ```bash
-curl -F candidate_id=349f5aba-7c6e-4de2-99b6-02a2039aaa43 \
+curl -b jar -H "Origin: http://localhost:3000" \
      -F "file=@resume.pdf;type=application/pdf" http://127.0.0.1:8000/api/resumes
 ```
 
@@ -312,23 +340,31 @@ curl -F candidate_id=349f5aba-7c6e-4de2-99b6-02a2039aaa43 \
 
 Raw resume text and section contents are stored but deliberately **not returned** by the API.
 
-### Access boundary (no authentication yet)
+### Authentication and access control
 
-The PRD requires that one candidate can never access another's data, but it does not define
-an authentication mechanism, so none has been built yet. Current safeguards:
+Phase 12 ([docs/phase-12-authentication-plan.md](docs/phase-12-authentication-plan.md)):
 
-- Candidate and resume routes are **not registered at all when `ENVIRONMENT=production`**, so
-  this unauthenticated API cannot be deployed by accident.
-- Ids are random UUIDs and there is no global list endpoint, so candidates and resumes cannot be
-  enumerated. This is *not* access control: anyone holding an id has full access to it.
-- Every `/{id}` route loads its object through a single dependency (`get_candidate` in
-  `candidates.py`, `get_resume` in `resumes.py`); the ownership check goes there once
-  authentication exists.
+- **Passwords** are hashed with `hashlib.scrypt` (N=2^14, r=8, p=5, random salt) and never
+  logged or returned. Candidates created before Phase 12 have no password and cannot log in.
+- **Sessions:** a random token lives only in the `coach_session` cookie (`HttpOnly`,
+  `SameSite=Lax`, `Secure` when `AUTH_COOKIE_SECURE=true`). The database keeps its SHA-256 in
+  `auth_sessions` with an absolute 7-day expiry. Logout deletes the row.
+- **Lockout:** 5 wrong passwords lock the account for 15 minutes (`429`). Attempts serialise on
+  the candidate's row lock, so parallel guesses cannot get past the limit.
+- **CSRF:** `POST`/`PUT`/`PATCH`/`DELETE` must carry an `Origin` listed in `CORS_ORIGINS`;
+  anything else is `403`.
+- **Isolation:** every route except `GET /api/health` and the auth endpoints needs a session
+  (`401` otherwise; a test sweeps every served route). Each object is loaded through one ownership
+  check (`get_candidate`, `get_resume`, `get_interview_session`, `owned_session_id`). Another
+  candidate's object answers `404`, exactly like a missing one. A client-supplied `candidate_id`
+  is never trusted.
+- **Production:** still only `/api/health` (`ENVIRONMENT=production` registers no other route).
 - The database guarantees a fact belongs to the same candidate as its resume (composite
   foreign key `(resume_id, candidate_id) → resumes(id, candidate_id)`).
-- The frontend remembers the created candidate id in `localStorage` for convenience. That is
-  not authentication either.
-- Names and emails are never written to logs (enforced by tests).
+- The frontend keeps no identity in browser storage. It asks `GET /api/auth/me`, and its fetches
+  send the cookie (`credentials: "include"`). This needs the frontend and API on the same site,
+  e.g. `localhost:3000` and `localhost:8000`.
+- Names, emails, passwords and tokens are never written to logs (enforced by tests).
 
 ## Model Gateway
 
@@ -553,7 +589,7 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
 
 | Endpoint | Success | Errors |
 |---|---|---|
-| `POST /api/interview-sessions` `{"candidate_id"}` | `201`, status `PROFILE_REVIEW` | `404` candidate · `409` unfinished session exists (detail names the candidate's own session id) · `422` |
+| `POST /api/interview-sessions` `{}` | `201`, status `PROFILE_REVIEW`, for the signed-in candidate | `401` · `409` unfinished session exists (detail names the candidate's own session id) · `422` (including any `candidate_id` in the body) |
 | `GET /api/interview-sessions/{id}` | `200` | `404` · `422` |
 | `GET /api/candidates/{id}/interview-sessions` | `200`, newest first | `404` |
 | `POST /api/interview-sessions/{id}/actions` `{"action"}` | `200` | `404` · `409` not allowed now / facts pending · `422` unknown or system event. The time limit is applied first: an expired interview is closed (`TIME_LIMIT`) and the action then gets `409` naming `REPORT_GENERATION` |
@@ -561,8 +597,9 @@ CREATED → PROFILE_PROCESSING → PROFILE_REVIEW ──CONFIRM_PROFILE──→
 
 A session is `{id, candidate_id, status, created_at, updated_at}`; its plan is read with
 `GET /api/interview-sessions/{id}/plan`. A `409` says why, e.g.
-`{"detail": "Cannot PAUSE an interview session in REPORT_GENERATION."}`. Like the other routes,
-these are not registered when `ENVIRONMENT=production`.
+`{"detail": "Cannot PAUSE an interview session in REPORT_GENERATION."}`. Every session route
+needs a signed-in candidate (`401`), and another candidate's session is `404`. Like the other
+routes, these are not registered when `ENVIRONMENT=production`.
 
 ### Transactions, concurrency, retries
 
@@ -688,7 +725,7 @@ text (enforced by tests).
 
 A repeated plan request gets `409` naming the current state; `GET .../plan` returns the plan. AI
 failures never fail the request: they produce a RULES plan. Not served when
-`ENVIRONMENT=production`, like the other unauthenticated routes.
+`ENVIRONMENT=production`, like every route except the health check.
 
 ### Agent framework (PRD §55)
 
@@ -1020,8 +1057,8 @@ time limit applied first (as on every interview write) · lock the session row
 | `POST /api/interview-sessions/{id}/report` `{}` | `200 {session_id, status: "COMPLETED", report}` (first call completes the session; repeats return the same report) | `404` · `409` `"The report is available after the interview has finished."` · `409` `"Evaluate every answer before requesting the report: {n} not evaluated yet."` · `422` any body field · `503` |
 | `GET /api/interview-sessions/{id}/report` | `200 {session_id, status, report}` | `404` · `409` `"The report has not been generated yet."` (not `COMPLETED`) |
 
-Not served when `ENVIRONMENT=production`. There is no authentication yet (see
-[Access boundary](#access-boundary-no-authentication-yet)).
+Not served when `ENVIRONMENT=production`. Only the session's owner can read or generate it (see
+[Authentication and access control](#authentication-and-access-control)).
 
 ### Privacy and concurrency
 
@@ -1120,7 +1157,8 @@ duplicate any backend rule:
 - **Retry:** shown only when the report says it is available, and it opens the new READY session.
 
 Limitations:
-- no authentication (local use only, like the API);
+- signing in is required (Phase 12); a session that ends mid-interview sends you to `/login`, and
+  an unsent answer is lost;
 - no rate limiting;
 - closing the browser does not pause the interview (use Pause);
 - an unsent answer is lost on reload;
@@ -1136,6 +1174,7 @@ Limitations:
 | `API_PORT` | backend | no | `8000` | Bind port for `python -m app.main` |
 | `CORS_ORIGINS` | backend | no | `http://localhost:3000` | Comma-separated exact origins; `*` is rejected |
 | `MAX_RESUME_SIZE_MB` | backend | no | `5` | Largest accepted resume PDF (1–20 MB); larger → `413` |
+| `AUTH_COOKIE_SECURE` | backend | no | `false` | Mark the session cookie `Secure` (HTTPS only); set `true` whenever the API is served over HTTPS |
 | `AI_PROVIDERS` | backend | no | empty (AI off) | Ordered `groq,gemini,nvidia` subset: primary first, then fallbacks (code default is empty; your local `.env` uses `gemini,groq,nvidia`) |
 | `AI_TIMEOUT_SECONDS` | backend | no | `20` | Per attempt (0–120] |
 | `AI_MAX_RETRIES` | backend | no | `1` | Extra attempts per provider, transient errors only (0–5) |
@@ -1206,3 +1245,4 @@ Adding a model:
 | `178659f38d45` | Interviewer: session `ai_consent`, `active_seconds`, `active_since`, `finish_reason` (CHECKed, only on finished sessions); `interview_consent_events`; `interview_questions` (≤ 2 follow-ups, ≤ 2 rephrases, one open question per session, answers ≤ 10,000 characters, `NOT_EVALUATED` only); allow `QUESTION_GENERATION` calls. Downgrade **refuses** while questions or consent changes exist |
 | `3871903c395d` | Allow finish reason `NO_ELIGIBLE_TOPIC`. Downgrade **refuses** while a session has it (no older reason is true for it) |
 | `3a4785ecf08e` | Evaluator: `answer_evaluations` (one per answer, cascades), `answer_evaluation_criteria` (CHECKed criterion names, scores 1–5, evidence behind every score), answer statuses `NOT_APPLICABLE` / `OBSERVATIONS_ONLY` / `EVALUATED`; allow `ANSWER_EVALUATION` calls. Downgrade **refuses** while any evaluation or evaluation status exists |
+| `5c0e1d2f7a91` | Authentication: `candidates.password_hash` (NULL = cannot log in), `failed_logins` (CHECK >= 0), `locked_until`; `auth_sessions` (SHA-256 token hash PK, `ON DELETE CASCADE` from candidates, indexed `candidate_id`, CHECK `expires_at > created_at`). Downgrade **refuses** while any candidate has a password; sessions are dropped |
