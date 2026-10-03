@@ -4,37 +4,53 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 13 (Manual profile entry): a candidate can add, edit and delete their
-own skills, projects, experience, education and certifications without a resume. They are
-approved as soon as they are added and are planned like approved resume facts (see
-[Manual profile facts](#manual-profile-facts)). Builds on Phase 12 (Authentication and candidate
-isolation): email + password sign-in
-with server-side sessions in an HttpOnly cookie. Every route except the health check needs a
-signed-in candidate, and one candidate can never read or change another's data: a foreign id
-answers `404` (see [Authentication and access control](#authentication-and-access-control)).
-Builds on Phase 11 (Text interview UI): the browser runs the whole interview at
-`/interview`: profile confirmation, planning with explicit AI consent, questions and answers,
-pause/resume, feedback, the report and retry, all through the existing API (see
-[Text Interview UI](#text-interview-ui)). Builds on Phase 10 (Retry): `POST .../retry` turns a completed interview's topics to
-practise into a new, ready-to-start session with those topics copied word for word, after
-re-checking their profile facts. No model call and no migration. Builds on the report (Phase 9:
-once every answer of a finished interview is evaluated, `POST .../report` completes the session
-(`REPORT_GENERATION` → `COMPLETED`) and returns a deterministic report built from stored data: no
-model call, no stored copy, no combined score), the answer evaluator (Phase 8: criterion scores 1–5 backed by exact quotes with the
-session's AI consent, or deterministic observations without it; evaluation never changes the
-interview), the interviewer (Phase 7: code decides every topic, follow-up, rephrase and the
-finish; a model may only word a follow-up or rephrase, with consent), the interview planner
-(Phase 6), the
-interview state machine (Phase 5), the provider-independent model gateway (Phase 4) and resume
-processing with candidate review.
+## What a candidate can do
 
-> AI is **optional and off by default**. Uploads always use the rule-based extractor; AI
-> extraction runs only when a candidate clicks "Find more with AI" on a configured server, and
-> everything it suggests still needs the candidate's approval. See [Model Gateway](#model-gateway).
+1. **Create an account** and sign in (email + password, server-side session in an HttpOnly cookie).
+2. **Build a profile** by typing skills, projects, experience, education and certifications, and/or
+   by uploading a PDF resume. Resumes of any layout are read with deterministic rules; everything
+   found is listed with the line it came from and must be **approved** before it is used. One click
+   approves or rejects everything still pending; an optional "Find more with AI" asks a model for
+   more items, each checked against the resume text.
+3. **Plan a text interview** for a software developer internship: experience level, type
+   (technical, behavioral, project deep dive, mixed), difficulty and length (15/30/45 minutes), and
+   whether to allow AI assistance for this interview (off by default).
+4. **Review the plan** (ordered topics, what each is based on) and **download or print** it.
+5. **Take the interview**: questions, adaptive follow-ups, "ask to rephrase", "I don't know",
+   skip, pause and resume, a server-kept timer, recovery after a refresh or a dropped connection.
+6. **Get feedback**: each answer is evaluated against a rubric (criterion scores with quotes from
+   the answer when AI is on, deterministic observations otherwise), then a **report** that never
+   combines scores into one number. Download or print it.
+7. **Retry** the topics the report marks to practise, as a new interview, and see every attempt
+   in the **interview history** (each with its own report).
 
-> **Production still serves only `/api/health`.** Authentication exists (Phase 12), but enabling
-> the application in production is a later phase. See
-> [Authentication and access control](#authentication-and-access-control).
+The product is a practice tool: no hiring decisions, no ranking, no emotion or personality scoring.
+
+### How the system is built
+
+```text
+User → Next.js (frontend/) → FastAPI (backend/) → services + state machine (the orchestrator)
+                                                     ├─ deterministic rules: plans, questions,
+                                                     │  timing, limits, reports, retries
+                                                     └─ Model Gateway → Gemini / Groq / NVIDIA
+                                                          (optional, with consent; validated)
+                                                  → PostgreSQL (constraints mirror every rule)
+```
+
+**The LLM proposes, the orchestrator decides, the validator verifies, the database stores.**
+A model may only *propose*: resume items (grounded in the resume text), a plan (validated against
+the approved facts and the settings), the wording of a follow-up or rephrase (validated against
+the plan and the answer) and a rubric evaluation (every score backed by an exact quote). Code
+decides everything else: which question comes next, the time limit, whether an interview is over,
+the report, retry eligibility, identity, ownership and usage limits. When a model is off, fails,
+times out, returns invalid output or a usage limit is reached, the same deterministic path runs
+and the UI says why.
+
+> AI is **optional and off by default**, per interview. Without any AI provider configured the
+> whole product still works with fixed rules. See [Model Gateway](#model-gateway).
+
+> **Production mode still serves only `/api/health`.** See
+> [Deployment considerations](#deployment-considerations) for what enabling it requires.
 
 ## Architecture
 
@@ -78,6 +94,7 @@ backend/
   app/api/routes/resumes.py    Resume upload, facts review, delete
   app/api/routes/manual_facts.py  The candidate's own facts: list, add, edit, delete
   app/services/manual_facts.py    Cap and duplicate rules under the candidate row lock
+  app/services/limits.py       Usage limits: per network, per candidate, global AI budget
   alembic/                     Migrations (reads DATABASE_URL via app settings)
   tests/                       pytest suite, runs against a separate test database
 frontend/
@@ -89,6 +106,14 @@ frontend/
   lib/interview.ts             Pure UI logic (status → screen, labels, fixed copy); node --test
   lib/auth.ts                  Pure auth rules (401 redirect, form validation); node --test
   lib/profile.ts               Fact categories and the fact text rule; node --test
+  lib/exportDoc.ts             Plan and report documents (escaped, script-free HTML); node --test
+  lib/download.ts              Save or print a document (browser only)
+e2e/
+  server.py                    The real backend with a deterministic fake model gateway
+  journey.mjs                  Real-browser journey (headless Edge over CDP, 28 checks)
+  db.py                        Test-only helper: move the server clock, clean up E2E data
+  live_smoke.py                Opt-in REAL-provider smoke test (costs credits)
+  fixtures/                    A real Edge-printed resume PDF
 ```
 
 ## Prerequisites
@@ -151,8 +176,8 @@ returned to clients. The full design is
 
 | Endpoint | Success | Errors |
 |---|---|---|
-| `POST /api/auth/register` `{name, email, password}` | `201` candidate, session cookie set | `409` email taken · `422` (password 8–128 chars) |
-| `POST /api/auth/login` `{email, password}` | `200` candidate, session cookie set | `401 {"detail": "Email or password is incorrect."}` (same for an unknown email) · `429` locked · `422` |
+| `POST /api/auth/register` `{name, email, password}` | `201` candidate, session cookie set | `409` email taken · `422` (password 8–128 chars) · `429` 5 sign-ups per hour from this network |
+| `POST /api/auth/login` `{email, password}` | `200` candidate, session cookie set | `401 {"detail": "Email or password is incorrect."}` (same for an unknown email) · `429` locked, or 20 attempts per 15 minutes from this network (see [Usage limits](#usage-limits-abuse-and-cost-controls)) · `422` |
 | `POST /api/auth/logout` | `204`, session deleted, cookie cleared | — |
 | `GET /api/auth/me` | `200` the signed-in candidate | `401 {"detail": "Please log in."}` |
 
@@ -260,16 +285,27 @@ transaction, so a resume is never stored half-processed and there is no in-fligh
 
 ### What gets extracted (deterministic, heuristic)
 
-A **section heading** must be a whole line that matches a known heading (case-insensitive,
-optional trailing `:`), e.g. `Technical Skills`, `Projects`, `Internships`, `Education`,
-`Certifications`. Headings such as `Summary`, `Objective` or `Hobbies` are recognised only to
-end the previous section; nothing is extracted from them. Text before the first heading (name,
-contact details) is never extracted.
+Resumes have no fixed template: sections can come in any order, under many names, any number of
+times, or be missing. A **section heading** is a whole line that matches a known name after
+removing numbering, markers and trailing punctuation (`01. SKILLS`, `EDUCATION ——`, `My
+Projects:`), case-insensitively; letter-spaced headings (`C E R T I F I C A T I O N S`) are read
+as one word. Known names include `Work Experience` / `Professional Experience` / `Employment` /
+`Internships` / `Research Experience` / `Volunteer Work` (experience), `Technical Skills` /
+`Core Competencies` / `Technical Competencies` (skills), `Projects` / `Selected Work` /
+`Open Source` (projects), `Education` / `Academic Background`, `Certifications` / `Licenses &
+Certifications`. A short Title Case heading that is not listed is categorised by its last word
+(`Teaching Experience`, `Major Projects`), never a bulleted or sentence line. Sections such as
+`Summary`, `Publications`, `Leadership`, `Awards` or `Hobbies` are recognised and kept in
+`parsed_json` (the UI lists them as "kept, no items taken from it"), and they end the previous
+section, so their lines are never misfiled. A `Skills: …` / `Education: …` line outside any
+section (a one-page resume without heading lines) is read as a one-line section. Text before the
+first heading (name, contact details) is never extracted.
 
 | Category | Rule |
 |---|---|
 | Skills | Each comma/`;`/`|`/`•` separated item, not split inside brackets (`SQL (MySQL, PostgreSQL)` stays one). A list sub-label (`Languages: …`) is dropped; a qualifier (`Python: 2 years`) stays attached. Sentences and items over 5 words are skipped |
 | Projects | Non-bulleted lines are entries; the title is the text before ` — `, ` | `, `: ` or ` (`. Bulleted/full-stop lines, dates, URLs and `Tech Stack:`-style labels are skipped |
+| Projects, Experience | A trailing date or date range is left out of the fact (`Library Management System 2024` → `Library Management System`); the full line stays the provenance |
 | Experience | Non-bulleted, non-sentence lines, kept whole (`Software Engineering Intern | Acme Corp`) |
 | Education, Certifications | Each line, kept whole |
 
@@ -320,10 +356,11 @@ and error class names only: never resume text, file names, names or emails (enfo
 
 | Method & path | Result |
 |---|---|
-| `POST /api/resumes` | `201` resume (any processing outcome) for the signed-in candidate · `401` no session · `413` too large · `415` not a PDF · `422` empty/missing file |
+| `POST /api/resumes` | `201` resume (any processing outcome) for the signed-in candidate · `401` no session · `413` too large · `415` not a PDF · `422` empty/missing file · `429` 10 uploads today |
 | `GET /api/candidates/{id}/resumes` | `200` that candidate's resumes, newest first |
 | `GET /api/resumes/{id}` | `200` resume |
 | `GET /api/resumes/{id}/facts` | `200` facts, grouped by category |
+| `POST /api/resumes/{id}/facts/review-pending` | `200` the resume's facts. Body: `{"status": "APPROVED" \| "REJECTED"}`: every fact of that resume still `PENDING_REVIEW` gets it; decided facts, other resumes and manual facts are untouched |
 | `PATCH /api/resumes/{id}/facts/{fact_id}` | `200` fact. Body: `{"status": "APPROVED" \| "REJECTED"}` and/or `{"fact": "..."}` (1–200 chars). `404` if the fact isn't in that resume |
 | `POST /api/resumes/{id}/ai-extraction` | `200` run summary (see [ProfileAgent](#profileagent-optional-ai-extraction)) · `409` resume wasn't read successfully · `503` AI not configured / unavailable (nothing changed) |
 | `DELETE /api/resumes/{id}` | `204`; its facts are deleted too, approved ones included |
@@ -1189,10 +1226,163 @@ duplicate any backend rule:
 Limitations:
 - signing in is required (Phase 12); a session that ends mid-interview sends you to `/login`, and
   an unsent answer is lost;
-- no rate limiting;
 - closing the browser does not pause the interview (use Pause);
 - an unsent answer is lost on reload;
-- no voice, progress history or multilingual UI.
+- no voice or multilingual UI. The interview history and exports are described below.
+
+## Interview history
+
+`/interview` lists every interview of the signed-in candidate, newest first: **Interview #n**
+(numbered from the oldest), date, type, difficulty and length, where it stands (being set up,
+planned, in progress, paused, completed), how it ended, and **"retry of interview #m"** for a
+retry. Completed interviews open their own report; unfinished ones continue; any can be deleted.
+Attempts are never combined: each keeps its own plan, answers, evaluations and report.
+
+`GET /api/candidates/{id}/interview-sessions` returns, per session, `finish_reason`,
+`retry_of_id` (the completed interview it retries; `NULL` for a first attempt or once the source
+was deleted) and the plan's `settings` and `plan_source`, never its questions or answers.
+`interview_sessions.retry_of_id` is set in the same INSERT as the retry session.
+
+## Plan and report export
+
+The plan screen and the report each offer **Download** and **Print or save as PDF**.
+
+- **Format:** one self-contained HTML file (`interview-plan-2-2026-10-03.html`, no name or id in
+  the file name) that opens in any browser and prints cleanly; "Print or save as PDF" opens the
+  browser's print dialog for exactly that document.
+- **Plan:** role, level, type, difficulty, length, number of topics, how it was planned (and why
+  fixed rules were used, if so), the ordered topics with what each is based on ("based on your
+  project “TrustLens”"), and how the interview works. The prepared questions and expected
+  concepts are not shown, as in a real interview.
+- **Report:** every section of the report page in the same order and wording.
+- **Safety:** built in the browser from what is on screen (`lib/exportDoc.ts`). Every value is
+  HTML-escaped, the document carries `Content-Security-Policy: default-src 'none';
+  style-src 'unsafe-inline'` so it can never run a script, and it contains no ids, prompts,
+  provider names or call metadata (tested; the E2E journey also opens both files in a browser
+  and prints them to PDF).
+
+## Usage limits (abuse and cost controls)
+
+Deterministic, in PostgreSQL (`usage_counters`, `app/services/limits.py`): one
+`INSERT … ON CONFLICT DO UPDATE SET count = count + 1 WHERE count < max` per request, so a limit
+is exact under any number of concurrent requests, across processes and restarts. Windows are
+fixed and aligned in UTC (an hour on the hour, a day at 00:00 UTC). A refused request is not
+counted. Counters hold no content; rows are deleted once their window ends.
+
+| Limit | Key | Default | When reached |
+|---|---|---|---|
+| Registration | network | 5 per hour | `429` + `Retry-After`, before any password is hashed |
+| Login attempts | network | 20 per 15 minutes | `429` + `Retry-After`, the same answer whether or not the email exists |
+| Resume uploads | candidate | 10 per UTC day | `429` (counted after validation, before parsing) |
+| AI extraction | candidate | 5 per day | `429`; the resume and its facts are unchanged |
+| AI planning | candidate | 10 per day | the fixed-rules plan, `rules_reason = QUOTA_REACHED` |
+| AI question wording | candidate | 150 per day | the fixed template, `QUOTA_REACHED` |
+| AI evaluation | candidate | 150 per day | observations only, `QUOTA_REACHED`, with a notice |
+| All AI requests | everyone | `AI_DAILY_REQUEST_LIMIT` (2000) per day | as above, for every candidate |
+
+- A **network** is an IPv4 address or an IPv6 /64, stored only as a SHA-256 key. The address
+  comes from the connection (`request.client.host`); behind a reverse proxy, run uvicorn with
+  `--proxy-headers --forwarded-allow-ips=<proxy>` so the real client address is used.
+- Model-backed work is charged when it is admitted, whatever the provider then does (the cost
+  is incurred either way). Deleting sessions, repeating a request, sending requests in parallel
+  or retrying cannot get around a limit; new accounts cannot get around the global budget.
+- The per-account lockout (5 wrong passwords → 15 minutes) is unchanged.
+- **Overall deadlines:** planning and extraction stop waiting for a model after 60 s, question
+  wording after 30 s and evaluation after 60 s, whatever the per-attempt timeout and retries,
+  so a hanging provider never holds a server worker longer.
+- **Request size:** JSON bodies are refused past 256 KB while they arrive; only the resume
+  upload may reach `MAX_RESUME_SIZE_MB` (+64 KB of form overhead).
+
+## Logging and observability
+
+The app's own log lines go to stderr at `LOG_LEVEL` (default `INFO`): every model-call attempt
+(request id, capability, provider, model, attempt, outcome, latency, tokens), validation
+rejections as rule codes, state transitions, and usage limits reached (the scope only). Logs
+never contain passwords, session tokens, API keys, resume text, facts, answers, prompts, model
+output or provider payloads (enforced by tests). `provider_calls` keeps the same call metadata,
+with no content and no link to a candidate.
+
+## Browser end-to-end journey
+
+`e2e/journey.mjs` drives the real UI in headless Microsoft Edge over the Chrome DevTools
+Protocol (Node built-ins only) against the real backend and PostgreSQL. Only the model gateway
+is a deterministic fake (`e2e/server.py`): no provider is contacted.
+
+```bash
+# terminal 1 (backend/; DATABASE_URL pointing at the development database)
+.venv/Scripts/python ../e2e/server.py
+# terminal 2 (frontend/)
+npm run build && npm run start
+# terminal 3 (repository root; DATABASE_URL exported for the clean-up helper)
+node e2e/journey.mjs        # screenshots, downloads and results.json in e2e/out/
+```
+
+The 28 checks walk a new candidate through registration, manual facts, a real resume (edit,
+reject, approve all, AI extraction with a discarded invented item), profile confirmation,
+planning with consent, the plan download and its PDF, follow-up, rephrase, pause with a draft,
+"I don't know", skip, a refresh, a dropped connection, a late answer after the deadline,
+evaluation, the report download and its PDF, a retry and its report, the history, logout and
+login, another account's 404s, a phone-sized screen, focus on screen changes, the sign-in
+throttle and empty browser storage. It deletes what it created.
+
+## Live provider smoke test
+
+`e2e/live_smoke.py` runs the real AI path once through a real backend: extraction, planning,
+an interview with model-worded questions, evaluation and the report, then a deliberate primary
+failure (an invalid Gemini key) to see the fallback. **It spends provider credits**; run it on
+purpose only. It prints call metadata, never content, and deletes its candidate.
+
+```bash
+# backend/: a real backend on another port, then the test (LIVE_PACE_SECONDS for free tiers)
+.venv/Scripts/python -m uvicorn app.main:app --port 8001
+LIVE_PACE_SECONDS=15 .venv/Scripts/python ../e2e/live_smoke.py http://127.0.0.1:8001
+```
+
+Findings from the runs on 2026-10-03 (Groq `openai/gpt-oss-120b`, Gemini `gemini-2.5-flash`):
+- Gemini's free tier allows **20 requests a day** for this model; after that every call is `429`
+  and, as the primary provider, costs two failed attempts before the fallback answers. Put a
+  paid or higher-quota provider first in `AI_PROVIDERS`.
+- NVIDIA has **retired** `nvidia/nemotron-3-super-120b-a12b` (HTTP 410, now treated as model
+  unavailable). Choose a current model (`GET https://integrate.api.nvidia.com/v1/models`) and
+  re-run `tests/test_live_providers.py`.
+- Gemini refused the full planning schema ("too many states"); it now receives the schema
+  without bounds and the gateway still validates against the full one.
+
+## Deployment considerations
+
+Production mode (`ENVIRONMENT=production`) serves only `/api/health` and no API docs. Before
+enabling the application routes there:
+- serve the frontend and the API over **HTTPS on the same site** (the session cookie is
+  `SameSite=Lax`), set `AUTH_COOKIE_SECURE=true` and `CORS_ORIGINS` to the real origin;
+- run uvicorn behind the proxy with `--proxy-headers --forwarded-allow-ips=<proxy address>`, so
+  per-network limits see real client addresses;
+- keep secrets (`DATABASE_URL`, provider keys) in the platform's secret store, never in git;
+- run `alembic upgrade head` before starting a new version; back up PostgreSQL (all candidate
+  data lives there; usage counters are disposable);
+- size `AI_DAILY_REQUEST_LIMIT` from the provider plan, and order `AI_PROVIDERS` by quota;
+- add a password-reset flow (needs an email provider) and decide a data-retention period (see
+  [Known limitations](#known-limitations)).
+
+## Known limitations
+
+- **Production is not enabled** (above). There is no password reset or email verification yet
+  (both need an email provider); registration reveals whether an email is taken (`409`) and the
+  lockout's `429` reveals that an account exists.
+- **Retention:** data is kept until the candidate deletes it (profile, resume, interview);
+  the PRD's "no permanent storage by default" needs a retention period, a product decision.
+  Expired sign-in sessions are purged only when that candidate signs in again.
+- **Resumes:** text-based PDFs only (scanned resumes need OCR); one fixed role (software
+  developer intern); two-column layouts are read in the order the PDF stores the text; a project
+  line with its technologies after the title (`Expense Splitter Kotlin, Android`) keeps them in
+  the title for the candidate to edit.
+- **AI quality depends on the provider:** follow-up wording is accepted only when the model
+  anchors it on a planned term the candidate actually used; otherwise the fixed template asks
+  "Could you elaborate on your answer?". Evaluation is not benchmarked against human reviewers
+  (PRD §63).
+- **Not built (PRD SHOULD/COULD):** voice and speech metrics, job-description upload, progress
+  trends across attempts, learning mode, a multilingual UI, text-to-speech.
+- Closing the browser does not pause the interview (use Pause); an unsent answer is kept in the
+  page only and is lost on reload.
 
 ## Environment variables
 
@@ -1209,6 +1399,9 @@ Limitations:
 | `AI_TIMEOUT_SECONDS` | backend | no | `20` | Per attempt (0–120] |
 | `AI_MAX_RETRIES` | backend | no | `1` | Extra attempts per provider, transient errors only (0–5) |
 | `AI_MAX_OUTPUT_TOKENS` | backend | no | `8192` | Upper bound sent as `max_tokens` (256–32768) |
+| `AI_DAILY_REQUEST_LIMIT` | backend | no | `2000` | Model-backed requests admitted per UTC day across all candidates; `0` = always use the rules |
+| `LOG_LEVEL` | backend | no | `INFO` | The app's own log lines (metadata only) |
+| `LIVE_PACE_SECONDS` | live smoke test | no | `0` | Wait before each model-backed request (free-tier rate limits) |
 | `GROQ_API_KEY` / `GROQ_MODEL` | backend | if `groq` listed | — | Secret key + model id |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | backend | if `gemini` listed | — | Secret key + model id |
 | `NVIDIA_API_KEY` / `NVIDIA_MODEL` | backend | if `nvidia` listed | — | Secret key + model id |
@@ -1230,6 +1423,8 @@ npm test            # node --test lib/**/*.test.ts (Node 22.6+ runs TypeScript n
 npm run typecheck
 npm run lint
 npm run build
+
+# browser journey and live smoke test: see the sections above
 ```
 
 ### Test database
@@ -1276,4 +1471,6 @@ Adding a model:
 | `3871903c395d` | Allow finish reason `NO_ELIGIBLE_TOPIC`. Downgrade **refuses** while a session has it (no older reason is true for it) |
 | `3a4785ecf08e` | Evaluator: `answer_evaluations` (one per answer, cascades), `answer_evaluation_criteria` (CHECKed criterion names, scores 1–5, evidence behind every score), answer statuses `NOT_APPLICABLE` / `OBSERVATIONS_ONLY` / `EVALUATED`; allow `ANSWER_EVALUATION` calls. Downgrade **refuses** while any evaluation or evaluation status exists |
 | `5c0e1d2f7a91` | Authentication: `candidates.password_hash` (NULL = cannot log in), `failed_logins` (CHECK >= 0), `locked_until`; `auth_sessions` (SHA-256 token hash PK, `ON DELETE CASCADE` from candidates, indexed `candidate_id`, CHECK `expires_at > created_at`). Downgrade **refuses** while any candidate has a password; sessions are dropped |
+| `9d2e6f1a7c40` | Usage limits: `usage_counters` (PK `scope, key, window_start`, CHECK `count >= 1`, index on `expires_at`, no FK); rules reason `QUOTA_REACHED` on questions and evaluations. Downgrade **refuses** while any row uses `QUOTA_REACHED`; counters are dropped |
+| `b4c8e2d9f013` | Retry link: `interview_sessions.retry_of_id` (FK to the source, `ON DELETE SET NULL`, indexed, CHECK `retry_of_id <> id`). Downgrade **refuses** while a retry is linked |
 | `70b0b7891bc0` | Manual facts: `candidate_facts.source` allows `MANUAL`; resume provenance columns nullable only for manual facts (CHECK `provenance_matches_source`: a manual fact has none and is `APPROVED`, a resume fact has all); partial unique index `uq_candidate_facts_manual_fact` on `(candidate_id, category, lower(fact))`. Downgrade **refuses** while any manual fact exists |
