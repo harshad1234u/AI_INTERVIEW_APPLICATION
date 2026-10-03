@@ -16,7 +16,14 @@ from sqlalchemy.orm import Session
 
 from app.ai.providers import get_model_gateway
 from app.api.deps import SESSION_COOKIE, current_candidate
-from app.api.routes import auth as auth_routes, candidates, health, interview_sessions, resumes
+from app.api.routes import (
+    auth as auth_routes,
+    candidates,
+    health,
+    interview_sessions,
+    manual_facts,
+    resumes,
+)
 from app.core import security
 from app.core.config import Settings, get_settings
 from app.db.session import SessionLocal
@@ -418,7 +425,7 @@ PUBLIC = {("GET", "/api/health"), ("POST", "/api/auth/register"), ("POST", "/api
 
 
 ROUTERS = [health.router, auth_routes.router, candidates.router, resumes.router,
-           interview_sessions.router]
+           manual_facts.router, interview_sessions.router]
 
 
 def _routes() -> list[tuple[str, str, APIRoute]]:
@@ -505,8 +512,10 @@ def build_world(client: TestClient, db: Session, email: str) -> dict:
     assert evaluate(client, done, question["id"]).status_code == 200
     assert post_report(client, done).json()["status"] == "COMPLETED"
     live = client.post("/api/interview-sessions", json={}).json()["id"]
+    manual = client.post(f"/api/candidates/{cid}/manual-facts",  # Phase 13
+                         json={"category": "SKILL", "fact": "Go"}).json()["id"]
     return {"candidate": cid, "resume": str(resume_id), "fact": str(fact_ids[0]), "done": done,
-            "question": question["id"], "live": live}
+            "question": question["id"], "live": live, "manual": manual}
 
 
 def intruder_requests(w: dict, mine: dict) -> list[tuple[str, str, dict | None]]:
@@ -524,6 +533,11 @@ def intruder_requests(w: dict, mine: dict) -> list[tuple[str, str, dict | None]]
         ("PATCH", f"/api/resumes/{w['resume']}/facts/{w['fact']}", {"status": "REJECTED"}),
         ("PATCH", f"/api/resumes/{mine['resume']}/facts/{w['fact']}", {"status": "REJECTED"}),
         ("POST", f"/api/resumes/{w['resume']}/ai-extraction", None),
+        ("GET", f"/api/candidates/{w['candidate']}/manual-facts", None),
+        ("POST", f"/api/candidates/{w['candidate']}/manual-facts",
+         {"category": "SKILL", "fact": "Injected"}),
+        ("PATCH", f"/api/manual-facts/{w['manual']}", {"fact": "Hijacked"}),
+        ("DELETE", f"/api/manual-facts/{w['manual']}", None),
         ("DELETE", f"/api/resumes/{w['resume']}", None),
         ("GET", f"{s}/{done}", None),
         ("GET", f"{s}/{done}/plan", None),
@@ -579,7 +593,7 @@ def test_cross_candidate_requests_are_404_and_change_nothing(
                                             "Fact not found", "Interview session not found",
                                             "Question not found"}, (method, url)
             count += 1
-    assert count == 58
+    assert count == 66
     assert snapshot(db_session) == before
 
 
@@ -627,6 +641,11 @@ def test_each_candidate_still_reaches_their_own_resources(worlds: tuple, owner: 
         ("PATCH", f"/api/candidates/{w['candidate']}", {"name": "Renamed"}, 200),
         ("PATCH", f"/api/resumes/{w['resume']}/facts/{w['fact']}", {"status": "APPROVED"}, 200),
         ("POST", f"/api/resumes/{w['resume']}/ai-extraction", None, 503),  # no AI configured
+        ("GET", f"/api/candidates/{w['candidate']}/manual-facts", None, 200),
+        ("POST", f"/api/candidates/{w['candidate']}/manual-facts",
+         {"category": "SKILL", "fact": "Rust"}, 201),
+        ("PATCH", f"/api/manual-facts/{w['manual']}", {"fact": "Go 1.23"}, 200),
+        ("DELETE", f"/api/manual-facts/{w['manual']}", None, 204),
         ("PUT", f"{s}/{w['live']}/ai-consent", {"granted": False}, 200),
         ("POST", f"{s}/{w['live']}/questions/next", {}, 409),  # not started yet
         ("POST", f"{s}/{w['live']}/answers",

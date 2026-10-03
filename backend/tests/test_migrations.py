@@ -89,6 +89,8 @@ def test_interview_sessions_migration_downgrades_alone() -> None:
         assert "interview_sessions" not in insp.get_table_names()
         # Stepping back through Phase 12 also drops its one candidates CHECK, nothing else.
         before["candidates"].discard("ck_candidates_failed_logins_not_negative")
+        # ...and through Phase 13, its one candidate_facts CHECK.
+        before["candidate_facts"].discard("ck_candidate_facts_provenance_matches_source")
         assert {t: {c["name"] for c in insp.get_check_constraints(t)} for t in before} == before
     finally:
         command.upgrade(cfg, "head")
@@ -158,7 +160,7 @@ def test_resume_tables_schema() -> None:
     assert {c["name"] for c in insp.get_check_constraints("candidate_facts")} == {
         "ck_candidate_facts_category", "ck_candidate_facts_source", "ck_candidate_facts_status",
         "ck_candidate_facts_fact_not_blank", "ck_candidate_facts_extracted_fact_not_blank",
-        "ck_candidate_facts_extracted_by",
+        "ck_candidate_facts_extracted_by", "ck_candidate_facts_provenance_matches_source",
     }
 
 
@@ -602,7 +604,7 @@ def test_interviewer_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {AUTH_REVISION}
+    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
 
 
 # ---------- NO_ELIGIBLE_TOPIC finish reason (Decision A) ----------
@@ -659,7 +661,7 @@ def test_finish_reason_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {AUTH_REVISION}
+    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
 
 
 # ---------- question text limit: 640 (approved 2026-10-02) ----------
@@ -882,7 +884,7 @@ def test_evaluator_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {AUTH_REVISION}
+    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
 
 
 # ---------- Phase 12: authentication ----------
@@ -965,7 +967,7 @@ def committed_password() -> Iterator[None]:
 def test_auth_downgrade_refuses_while_passwords_exist(committed_password: None) -> None:
     with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 candidate"):
         command.downgrade(Config(str(ALEMBIC_INI)), EVALUATOR_REVISION)
-    assert _current_heads() == {HEAD} == {AUTH_REVISION}
+    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
     assert "auth_sessions" in inspect(engine).get_table_names()
 
 
@@ -986,7 +988,7 @@ def test_auth_revision_downgrades_and_re_upgrades_keeping_candidates() -> None:
             "id", "email", "name", "created_at"}
         command.upgrade(cfg, "head")
         command.check(cfg)
-        assert _current_heads() == {HEAD} == {AUTH_REVISION}
+        assert _current_heads() == {HEAD} == {MANUAL_REVISION}
         with engine.connect() as conn:
             # The candidate survived both directions, unchanged; sessions did not (signed out).
             assert tuple(conn.execute(text(
@@ -997,6 +999,149 @@ def test_auth_revision_downgrades_and_re_upgrades_keeping_candidates() -> None:
                 conn.execute(text("INSERT INTO candidates (email, name) "
                                   "VALUES ('kept@example.com', 'Dup')"))
             assert exc.value.orig.diag.constraint_name == "uq_candidates_email"
+    finally:
+        command.upgrade(cfg, "head")
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+# ---------- Phase 13: manual facts ----------
+
+MANUAL_REVISION = "70b0b7891bc0"
+PROVENANCE_CHECK = "ck_candidate_facts_provenance_matches_source"
+MANUAL_COLUMNS = ("candidate_id, category, fact, extracted_fact, source, status, resume_id, "
+                  "source_section, source_text, extracted_by")
+
+
+def _manual(db: Session, candidate_id: str, fact: str = "Python", **overrides: object) -> None:
+    row = {"c": candidate_id, "cat": "SKILL", "f": fact, "src": "MANUAL", "st": "APPROVED",
+           "r": None, "sec": None, "txt": None, "by": None, **overrides}
+    db.execute(text(f"INSERT INTO candidate_facts ({MANUAL_COLUMNS}) VALUES "
+                    "(:c, :cat, :f, :f, :src, :st, :r, :sec, :txt, :by)"), row)
+
+
+def test_manual_fact_schema() -> None:
+    insp = inspect(engine)
+    nullable = {c["name"] for c in insp.get_columns("candidate_facts") if c["nullable"]}
+    assert nullable == {"resume_id", "source_section", "source_text", "extracted_by",
+                        "provider_call_id"}
+    indexes = {i["name"]: i for i in insp.get_indexes("candidate_facts")}
+    index = indexes["uq_candidate_facts_manual_fact"]
+    assert index["unique"]
+    assert "MANUAL" in index["dialect_options"]["postgresql_where"]
+    with engine.connect() as conn:
+        definition = conn.scalar(text("SELECT indexdef FROM pg_indexes "
+                                      "WHERE indexname = 'uq_candidate_facts_manual_fact'"))
+    assert "lower((fact)::text)" in definition
+
+
+def test_a_manual_fact_has_no_resume_provenance(db_session: Session) -> None:
+    c = _candidate(db_session)
+    resume = _resume(db_session, c)
+    _manual(db_session, c)  # the valid shape
+    for bad in [
+        {"r": resume},  # manual, but pointing at a resume
+        {"sec": "Skills"},
+        {"txt": "Python"},
+        {"by": "RULES"},
+        {"st": "PENDING_REVIEW"},  # manual facts are approved for good (M1)
+        {"st": "REJECTED"},
+        {"src": "RESUME"},  # a resume fact without its provenance
+        {"src": "RESUME", "r": resume, "sec": "Skills", "txt": "Python"},  # ...no extracted_by
+    ]:
+        with pytest.raises(IntegrityError) as exc, db_session.begin_nested():
+            _manual(db_session, c, fact=f"Fact {len(str(bad))}", **bad)
+        assert exc.value.orig.diag.constraint_name == PROVENANCE_CHECK, bad
+    with pytest.raises(IntegrityError) as exc, db_session.begin_nested():
+        _manual(db_session, c, fact="Typed", src="TYPED", r=resume, sec="Skills", txt="x",
+                by="RULES")
+    assert exc.value.orig.diag.constraint_name == "ck_candidate_facts_source"
+
+
+def test_existing_resume_facts_are_unchanged_by_the_new_rules(db_session: Session) -> None:
+    c = _candidate(db_session)
+    fact = _fact(db_session, c, _resume(db_session, c))
+    row = db_session.execute(text("SELECT source, resume_id IS NOT NULL, source_section, "
+                                  "source_text, extracted_by FROM candidate_facts WHERE id = :f"),
+                             {"f": fact}).one()
+    assert row[0] == "RESUME" and row[1] and row[2] and row[3] and row[4] == "RULES"
+
+
+def test_manual_duplicates_are_refused_by_the_database(db_session: Session) -> None:
+    c, other = _candidate(db_session), _candidate(db_session, "other@example.com")
+    _manual(db_session, c, "Python")
+    for dup in ("Python", "PYTHON", "python"):
+        with pytest.raises(IntegrityError) as exc, db_session.begin_nested():
+            _manual(db_session, c, dup)
+        assert exc.value.orig.diag.constraint_name == "uq_candidate_facts_manual_fact"
+    _manual(db_session, c, "Python", cat="PROJECT")  # another category
+    _manual(db_session, other, "Python")  # another candidate
+    _fact(db_session, c, _resume(db_session, c), fact="Python")  # a resume fact is not indexed
+
+
+def test_deleting_a_resume_keeps_manual_facts_and_deleting_the_candidate_removes_them(
+    db_session: Session,
+) -> None:
+    c = _candidate(db_session)
+    resume = _resume(db_session, c)
+    _fact(db_session, c, resume)
+    _manual(db_session, c)
+    db_session.execute(text("DELETE FROM resumes WHERE id = :r"), {"r": resume})
+    assert db_session.scalars(text("SELECT source FROM candidate_facts WHERE candidate_id = :c"),
+                              {"c": c}).all() == ["MANUAL"]
+    db_session.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": c})
+    assert db_session.scalar(text("SELECT count(*) FROM candidate_facts")) == 0
+
+
+@pytest.fixture
+def committed_manual_fact() -> Iterator[None]:
+    with engine.begin() as conn:
+        cid = conn.scalar(text("INSERT INTO candidates (email, name) "
+                               "VALUES ('manual@example.com', 'M') RETURNING id"))
+        conn.execute(text(f"INSERT INTO candidate_facts ({MANUAL_COLUMNS}) VALUES "
+                          "(:c, 'SKILL', 'Go', 'Go', 'MANUAL', 'APPROVED', "
+                          "NULL, NULL, NULL, NULL)"),
+                     {"c": cid})
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+def test_manual_downgrade_refuses_while_manual_facts_exist(committed_manual_fact: None) -> None:
+    with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 manual fact"):
+        command.downgrade(Config(str(ALEMBIC_INI)), AUTH_REVISION)
+    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+
+
+def test_manual_revision_downgrades_and_re_upgrades_keeping_resume_facts() -> None:
+    """Upgrade -> downgrade -> upgrade on a database holding a Phase 12 resume fact."""
+    cfg = Config(str(ALEMBIC_INI))
+    with engine.begin() as conn:
+        cid = conn.scalar(text("INSERT INTO candidates (email, name) "
+                               "VALUES ('kept-fact@example.com', 'K') RETURNING id"))
+        rid = conn.scalar(text("INSERT INTO resumes (candidate_id, parsed_json, upload_status) "
+                               "VALUES (:c, '{}', 'PROCESSED') RETURNING id"), {"c": cid})
+        conn.execute(text("INSERT INTO candidate_facts (candidate_id, resume_id, category, fact, "
+                          "extracted_fact, source, source_section, source_text, status) VALUES "
+                          "(:c, :r, 'SKILL', 'Rust', 'Rust', 'RESUME', 'Skills', 'Rust', "
+                          "'APPROVED')"), {"c": cid, "r": rid})
+    fact_row = "SELECT category, fact, source, source_section, extracted_by, status " \
+               "FROM candidate_facts WHERE candidate_id = :c"
+    try:
+        command.downgrade(cfg, AUTH_REVISION)
+        assert _current_heads() == {AUTH_REVISION}
+        insp = inspect(engine)
+        assert not any(c["nullable"] for c in insp.get_columns("candidate_facts")
+                       if c["name"] in {"resume_id", "source_section", "source_text",
+                                        "extracted_by"})
+        command.upgrade(cfg, "head")
+        command.check(cfg)
+        assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+        with engine.connect() as conn:
+            assert tuple(conn.execute(text(fact_row), {"c": cid}).one()) == (
+                "SKILL", "Rust", "RESUME", "Skills", "RULES", "APPROVED")
     finally:
         command.upgrade(cfg, "head")
         with engine.begin() as conn:
