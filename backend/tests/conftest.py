@@ -27,7 +27,7 @@ os.environ["AI_PROVIDERS"] = ""
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine, text  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.db.session import engine, get_db  # noqa: E402
@@ -38,6 +38,16 @@ ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 @pytest.fixture(scope="session", autouse=True)
 def migrated_database() -> None:
     command.upgrade(Config(str(ALEMBIC_INI)), "head")
+
+
+@pytest.fixture(autouse=True)
+def fresh_usage_limits() -> Iterator[None]:
+    """Usage counters written on committed connections (race tests) outlive their test, and every
+    TestClient shares one network key: start each test with no usage counted."""
+    yield
+    with engine.begin() as conn:
+        if conn.scalar(text("SELECT to_regclass('usage_counters')")) is not None:
+            conn.execute(text("DELETE FROM usage_counters"))
 
 
 @pytest.fixture

@@ -55,22 +55,24 @@ def test_interview_sessions_table_schema() -> None:
     insp = inspect(engine)
     cols = {c["name"]: c for c in insp.get_columns("interview_sessions")}
     # Lifecycle (Phase 5) + the validated plan (Phase 6) + consent, clock and finish reason
-    # (Phase 7). Answers live in interview_questions, never here.
+    # (Phase 7) + the retry link (history). Answers live in interview_questions, never here.
     assert set(cols) == {"id", "candidate_id", "status", "created_at", "updated_at", "plan",
                          "plan_provider_call_id", "ai_consent", "active_seconds", "active_since",
-                         "finish_reason"}
+                         "finish_reason", "retry_of_id"}
     assert [n for n, c in cols.items() if c["nullable"]] == [
-        "plan", "plan_provider_call_id", "active_since", "finish_reason"]
+        "plan", "plan_provider_call_id", "active_since", "finish_reason", "retry_of_id"]
     assert {c["name"] for c in insp.get_check_constraints("interview_sessions")} == {
         "ck_interview_sessions_status", "ck_interview_sessions_plan_matches_status",
         "ck_interview_sessions_plan_is_object", "ck_interview_sessions_finish_reason",
         "ck_interview_sessions_active_seconds_not_negative",
         "ck_interview_sessions_finish_reason_only_when_finished",
+        "ck_interview_sessions_retry_of_another_session",
     }
     fks = {fk["referred_table"]: (fk["constrained_columns"], fk["options"].get("ondelete"))
            for fk in insp.get_foreign_keys("interview_sessions")}
     assert fks == {"candidates": (["candidate_id"], "CASCADE"),
-                   "provider_calls": (["plan_provider_call_id"], "SET NULL")}
+                   "provider_calls": (["plan_provider_call_id"], "SET NULL"),
+                   "interview_sessions": (["retry_of_id"], "SET NULL")}
     indexes = {i["name"]: i for i in insp.get_indexes("interview_sessions")}
     active = indexes["uq_interview_sessions_one_active_per_candidate"]
     assert active["unique"] and active["column_names"] == ["candidate_id"]
@@ -281,6 +283,7 @@ def test_deleting_candidate_cascades_in_the_database(db_session: Session) -> Non
 
 PLAN_REVISION, BEFORE_PLAN_REVISION = "b8d14f2a9c63", "e5813b741341"
 HEAD = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
+LATEST_REVISION = "b4c8e2d9f013"  # the newest revision: every round trip must end here
 CALL_COLUMNS = ("INSERT INTO provider_calls (request_id, capability, requested_provider, "
                 "succeeded, attempts, fallback_used, latency_ms) ")
 
@@ -604,7 +607,7 @@ def test_interviewer_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
 
 
 # ---------- NO_ELIGIBLE_TOPIC finish reason (Decision A) ----------
@@ -661,7 +664,7 @@ def test_finish_reason_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
 
 
 # ---------- question text limit: 640 (approved 2026-10-02) ----------
@@ -884,7 +887,7 @@ def test_evaluator_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
 
 
 # ---------- Phase 12: authentication ----------
@@ -967,7 +970,7 @@ def committed_password() -> Iterator[None]:
 def test_auth_downgrade_refuses_while_passwords_exist(committed_password: None) -> None:
     with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 candidate"):
         command.downgrade(Config(str(ALEMBIC_INI)), EVALUATOR_REVISION)
-    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
     assert "auth_sessions" in inspect(engine).get_table_names()
 
 
@@ -988,7 +991,7 @@ def test_auth_revision_downgrades_and_re_upgrades_keeping_candidates() -> None:
             "id", "email", "name", "created_at"}
         command.upgrade(cfg, "head")
         command.check(cfg)
-        assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+        assert _current_heads() == {HEAD} == {LATEST_REVISION}
         with engine.connect() as conn:
             # The candidate survived both directions, unchanged; sessions did not (signed out).
             assert tuple(conn.execute(text(
@@ -1112,7 +1115,7 @@ def committed_manual_fact() -> Iterator[None]:
 def test_manual_downgrade_refuses_while_manual_facts_exist(committed_manual_fact: None) -> None:
     with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 manual fact"):
         command.downgrade(Config(str(ALEMBIC_INI)), AUTH_REVISION)
-    assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
 
 
 def test_manual_revision_downgrades_and_re_upgrades_keeping_resume_facts() -> None:
@@ -1138,7 +1141,7 @@ def test_manual_revision_downgrades_and_re_upgrades_keeping_resume_facts() -> No
                                         "extracted_by"})
         command.upgrade(cfg, "head")
         command.check(cfg)
-        assert _current_heads() == {HEAD} == {MANUAL_REVISION}
+        assert _current_heads() == {HEAD} == {LATEST_REVISION}
         with engine.connect() as conn:
             assert tuple(conn.execute(text(fact_row), {"c": cid}).one()) == (
                 "SKILL", "Rust", "RESUME", "Skills", "RULES", "APPROVED")
@@ -1146,3 +1149,138 @@ def test_manual_revision_downgrades_and_re_upgrades_keeping_resume_facts() -> No
         command.upgrade(cfg, "head")
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+# ---------- usage limits ----------
+
+USAGE_REVISION = "9d2e6f1a7c40"
+
+
+def test_usage_counters_schema() -> None:
+    insp = inspect(engine)
+    assert {c["name"] for c in insp.get_columns("usage_counters")} == {
+        "scope", "key", "window_start", "count", "expires_at"}  # no address, no content
+    assert insp.get_pk_constraint("usage_counters")["constrained_columns"] == [
+        "scope", "key", "window_start"]
+    assert insp.get_foreign_keys("usage_counters") == []  # deleting an account resets nothing
+    assert {c["name"] for c in insp.get_check_constraints("usage_counters")} == {
+        "ck_usage_counters_count_positive"}
+
+
+def test_database_rejects_a_counter_below_one(db_session: Session) -> None:
+    with pytest.raises(IntegrityError, match="ck_usage_counters_count_positive"),             db_session.begin_nested():
+        db_session.execute(text("INSERT INTO usage_counters VALUES "
+                                "('s', 'k', now(), 0, now() + interval '1 day')"))
+
+
+def test_quota_reached_is_a_stored_rules_reason(db_session: Session) -> None:
+    sid = _waiting_session(db_session)
+    _question(db_session, sid, rules_reason="QUOTA_REACHED")
+    question = _answered_question(db_session)
+    _evaluation(db_session, question, source="RULES", rules_reason="QUOTA_REACHED", feedback=None)
+    with pytest.raises(IntegrityError, match="ck_interview_questions_rules_reason"):
+        _question(db_session, sid, seq=2, rules_reason="QUOTA_GONE")
+
+
+@pytest.fixture
+def committed_quota_question() -> Iterator[None]:
+    with engine.begin() as conn:
+        cid = conn.scalar(text("INSERT INTO candidates (email, name) "
+                               "VALUES ('quota@example.com', 'Q') RETURNING id"))
+        sid = conn.scalar(text("INSERT INTO interview_sessions (candidate_id, status, plan) "
+                               "VALUES (:c, 'WAITING_FOR_ANSWER', '{}') RETURNING id"), {"c": cid})
+        row = {**QUESTION, "rules_reason": "QUOTA_REACHED"}
+        conn.execute(text(f"INSERT INTO interview_questions (session_id, {', '.join(row)}) "
+                          f"VALUES (:session_id, {', '.join(':' + k for k in row)})"),
+                     {"session_id": sid, **row})
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+def test_usage_downgrade_refuses_while_quota_reached_is_stored(
+    committed_quota_question: None
+) -> None:
+    with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 question"):
+        command.downgrade(Config(str(ALEMBIC_INI)), MANUAL_REVISION)
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
+
+
+def test_usage_revision_downgrades_and_re_upgrades_cleanly() -> None:
+    cfg = Config(str(ALEMBIC_INI))
+    try:
+        command.downgrade(cfg, MANUAL_REVISION)
+        assert _current_heads() == {MANUAL_REVISION}
+        assert "usage_counters" not in inspect(engine).get_table_names()
+        command.upgrade(cfg, "head")
+        command.check(cfg)
+        assert _current_heads() == {HEAD} == {LATEST_REVISION}
+    finally:
+        command.upgrade(cfg, "head")
+
+
+# ---------- retry link (interview history) ----------
+
+RETRY_LINK_REVISION = "b4c8e2d9f013"
+
+
+def _completed_pair(db: Session) -> tuple[str, str]:
+    """A completed interview and its retry, for one candidate."""
+    cid = _candidate(db, f"{uuid.uuid4().hex}@example.com")
+    source = str(db.scalar(text(
+        "INSERT INTO interview_sessions (candidate_id, status, plan) "
+        "VALUES (:c, 'COMPLETED', '{}') RETURNING id"), {"c": cid}))
+    retry = str(db.scalar(text(
+        "INSERT INTO interview_sessions (candidate_id, status, plan, retry_of_id) "
+        "VALUES (:c, 'READY', '{}', :s) RETURNING id"), {"c": cid, "s": source}))
+    return source, retry
+
+
+def test_a_retry_keeps_its_link_until_the_source_is_deleted(db_session: Session) -> None:
+    source, retry = _completed_pair(db_session)
+    db_session.execute(text("DELETE FROM interview_sessions WHERE id = :s"), {"s": source})
+    assert db_session.execute(text(
+        "SELECT status, retry_of_id FROM interview_sessions WHERE id = :r"),
+        {"r": retry}).one() == ("READY", None)
+
+
+def test_a_session_cannot_retry_itself(db_session: Session) -> None:
+    _, retry = _completed_pair(db_session)
+    with pytest.raises(IntegrityError, match="ck_interview_sessions_retry_of_another_session"),             db_session.begin_nested():
+        db_session.execute(text("UPDATE interview_sessions SET retry_of_id = id WHERE id = :r"),
+                           {"r": retry})
+
+
+@pytest.fixture
+def committed_retry_link() -> Iterator[None]:
+    with Session(engine) as db:
+        source, _ = _completed_pair(db)
+        cid = db.scalar(text("SELECT candidate_id FROM interview_sessions WHERE id = :s"),
+                        {"s": source})
+        db.commit()
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+def test_retry_link_downgrade_refuses_while_a_retry_is_linked(committed_retry_link: None) -> None:
+    with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 interview session"):
+        command.downgrade(Config(str(ALEMBIC_INI)), USAGE_REVISION)
+    assert _current_heads() == {HEAD} == {LATEST_REVISION}
+
+
+def test_retry_link_revision_downgrades_and_re_upgrades_cleanly() -> None:
+    cfg = Config(str(ALEMBIC_INI))
+    try:
+        command.downgrade(cfg, USAGE_REVISION)
+        assert "retry_of_id" not in {c["name"] for c in
+                                     inspect(engine).get_columns("interview_sessions")}
+        command.upgrade(cfg, "head")
+        command.check(cfg)
+        assert _current_heads() == {HEAD} == {LATEST_REVISION} == {RETRY_LINK_REVISION}
+    finally:
+        command.upgrade(cfg, "head")

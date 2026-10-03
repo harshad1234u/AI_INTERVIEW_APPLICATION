@@ -389,3 +389,18 @@ def test_deleting_candidate_removes_ai_facts_but_not_anonymous_call_metadata(
         CandidateFact.resume_id == uuid.UUID(resume["id"])))
     assert left == 0
     assert len(calls(db_session)) == 1  # no candidate link, no content: nothing personal remains
+
+
+@pytest.mark.anyio
+async def test_a_hanging_provider_is_cut_off_at_the_extraction_deadline(monkeypatch) -> None:
+    import time
+
+    import app.ai.profile_agent as profile_agent
+    from app.ai.gateway import ModelUnavailableError
+    from tests.fakes import HANG, FakeProvider, make_gateway
+    monkeypatch.setattr(profile_agent, "EXTRACTION_SECONDS", 0.3)
+    started = time.monotonic()
+    with pytest.raises(ModelUnavailableError):
+        await profile_agent.extract_profile(
+            make_gateway(FakeProvider("groq", HANG), retries=3, timeout=10), "Skills\nPython")
+    assert time.monotonic() - started < 2

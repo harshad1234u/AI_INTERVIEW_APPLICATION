@@ -400,9 +400,28 @@ def test_deleting_the_source_keeps_the_retry(
     client: TestClient, completed: dict, started: str, candidate: str, db_session: Session
 ) -> None:
     new = post_retry(client, started).json()["session_id"]
+    assert client.get(f"/api/interview-sessions/{new}").json()["retry_of_id"] == started
     assert client.delete(f"/api/interview-sessions/{started}").status_code == 204
-    assert client.get(f"/api/interview-sessions/{new}").json()["status"] == "READY"
+    retry = client.get(f"/api/interview-sessions/{new}").json()
+    assert (retry["status"], retry["retry_of_id"]) == ("READY", None)  # the link goes, not the retry
     assert [s[0] for s in sessions(db_session, candidate)] == [uuid.UUID(new)]
+
+
+def test_the_history_shows_each_attempt_and_what_it_retries(
+    client: TestClient, completed: dict, started: str, candidate: str
+) -> None:
+    """Attempts stay separate: each has its own status, plan and finish; none is merged."""
+    new = post_retry(client, started).json()["session_id"]
+    # One test transaction: both rows share created_at, so the list order is not asserted here.
+    listed = {s["id"]: s for s in
+              client.get(f"/api/candidates/{candidate}/interview-sessions").json()}
+    retry, source = listed[new], listed[started]
+    assert ((retry["status"], retry["retry_of_id"]), (source["status"], source["retry_of_id"]))         == (("READY", started), ("COMPLETED", None))
+    assert retry["settings"] == source["settings"] == completed["summary"]["settings"]
+    assert (source["finish_reason"], source["plan_source"]) == (
+        completed["summary"]["finish_reason"], "RULES")
+    assert retry["finish_reason"] is None
+    assert not {"plan", "questions", "report"} & set(retry)  # a summary, not the content
 
 
 def test_deleting_the_candidate_removes_the_retry(

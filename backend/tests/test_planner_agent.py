@@ -185,3 +185,19 @@ async def test_capability_without_a_route_is_not_configured() -> None:
     outcome = await propose_plan(gateway, SETTINGS, FACTS)
     assert outcome.plan is None and outcome.rules_reason == RulesReason.NOT_CONFIGURED
     assert outcome.records == []
+
+
+async def test_a_hanging_provider_is_cut_off_at_the_planning_deadline(monkeypatch) -> None:
+    """No planning request can hold a worker longer than PLANNING_SECONDS, whatever the
+    per-attempt timeout and retries would allow."""
+    import time
+
+    import app.ai.planner_agent as planner_agent
+    from tests.fakes import HANG
+    monkeypatch.setattr(planner_agent, "PLANNING_SECONDS", 0.3)
+    provider = FakeProvider("groq", HANG)
+    started = time.monotonic()
+    outcome = await propose_plan(make_gateway(provider, retries=3, timeout=10), SETTINGS, FACTS)
+    assert time.monotonic() - started < 2
+    assert (outcome.plan, outcome.rules_reason) == (None, RulesReason.PROVIDERS_FAILED)
+    assert [r.error_type for r in outcome.records] == [ErrorKind.TIMEOUT]

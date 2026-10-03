@@ -114,8 +114,12 @@ def test_create_starts_in_profile_review_and_is_persisted(
     res = create(client)
     assert res.status_code == 201
     body = res.json()
-    assert set(body) == {"id", "candidate_id", "status", "created_at", "updated_at"}
+    assert set(body) == {"id", "candidate_id", "status", "created_at", "updated_at",
+                         "finish_reason", "retry_of_id", "settings", "plan_source"}
     assert (body["candidate_id"], body["status"]) == (candidate_id, "PROFILE_REVIEW")
+    # Nothing is planned or retried yet: the history fields are empty.
+    assert (body["finish_reason"], body["retry_of_id"], body["settings"],
+            body["plan_source"]) == (None, None, None, None)
     assert body["created_at"] == body["updated_at"]
     assert row(db_session, body["id"])[0] == "PROFILE_REVIEW"
     assert client.get(f"/api/interview-sessions/{body['id']}").json() == body
