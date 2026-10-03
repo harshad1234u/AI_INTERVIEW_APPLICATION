@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 # Room for multipart boundaries and part headers around the file.
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
+# Every other request is JSON; the largest real one (a 10,000-character answer) is ~40 KB.
+JSON_MAX_BYTES = 256 * 1024
+TOO_LARGE = "The request is too large."
+UPLOAD_PATH = "/api/resumes"
 
 
 class BodySizeLimit:
@@ -27,22 +31,30 @@ class BodySizeLimit:
     requests that send no Content-Length.
     """
 
-    def __init__(self, app: ASGIApp, max_bytes: int, detail: str) -> None:
+    def __init__(self, app: ASGIApp, max_bytes: int, detail: str, *,
+                 upload_path: str | None = None, upload_max_bytes: int = 0,
+                 upload_detail: str = "") -> None:
         self.app, self.max_bytes, self.detail = app, max_bytes, detail
+        # The resume upload alone may be larger (and gets its own message).
+        self.upload_path, self.upload_max_bytes = upload_path, upload_max_bytes
+        self.upload_detail = upload_detail
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         received = 0
+        upload = self.upload_path is not None and scope.get("path") == self.upload_path
+        limit = self.upload_max_bytes if upload else self.max_bytes
+        detail = self.upload_detail if upload else self.detail
 
         async def limited_receive() -> Message:
             nonlocal received
             message = await receive()
             received += len(message.get("body", b""))
-            if received > self.max_bytes:
+            if received > limit:
                 # Raised inside body parsing, so FastAPI returns it as a normal 413 response.
-                raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, self.detail)
+                raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, detail)
             return message
 
         await self.app(scope, limited_receive, send)
@@ -120,8 +132,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.add_middleware(
         BodySizeLimit,
-        max_bytes=settings.max_resume_bytes + MULTIPART_OVERHEAD_BYTES,
-        detail=resumes.too_large_detail(settings),
+        max_bytes=JSON_MAX_BYTES,
+        detail=TOO_LARGE,
+        upload_path=UPLOAD_PATH,
+        upload_max_bytes=settings.max_resume_bytes + MULTIPART_OVERHEAD_BYTES,
+        upload_detail=resumes.too_large_detail(settings),
     )
     app.add_exception_handler(OperationalError, database_unavailable)
     app.add_exception_handler(RequestValidationError, validation_error)

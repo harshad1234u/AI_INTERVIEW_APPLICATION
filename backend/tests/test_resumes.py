@@ -657,3 +657,15 @@ def test_review_pending_bodies_are_validated(client: TestClient, candidate_id: s
     assert client.post(f"/api/resumes/{resume['id']}/facts/review-pending",
                        json=body).status_code == 422
     assert {f["status"] for f in facts(client, resume["id"])} == {"PENDING_REVIEW"}
+
+
+def test_json_requests_have_a_much_smaller_body_limit(client: TestClient, candidate_id: str) -> None:
+    """Only the resume upload may send megabytes; a JSON body over 256 KB is refused while it
+    arrives, with a message that is not about resumes."""
+    from app.main import JSON_MAX_BYTES, TOO_LARGE
+    big = '{"fact": "' + "a" * JSON_MAX_BYTES + '", "category": "SKILL"}'
+    res = client.post(f"/api/candidates/{candidate_id}/manual-facts", content=big,
+                      headers={"Content-Type": "application/json"})
+    assert (res.status_code, res.json()) == (413, {"detail": TOO_LARGE})
+    # A 10,000-character answer is far below it.
+    assert len(('{"text": "' + "é" * 10_000 + '"}').encode()) < JSON_MAX_BYTES
