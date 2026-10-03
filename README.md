@@ -4,7 +4,11 @@ A resume-aware, adaptive interview **practice and coaching** platform for studen
 entry-level candidates. It is a learning tool, not a hiring or screening system.
 See [prd.md](prd.md) for the full product requirements.
 
-**Current status:** Phase 12 (Authentication and candidate isolation): email + password sign-in
+**Current status:** Phase 13 (Manual profile entry): a candidate can add, edit and delete their
+own skills, projects, experience, education and certifications without a resume. They are
+approved as soon as they are added and are planned like approved resume facts (see
+[Manual profile facts](#manual-profile-facts)). Builds on Phase 12 (Authentication and candidate
+isolation): email + password sign-in
 with server-side sessions in an HttpOnly cookie. Every route except the health check needs a
 signed-in candidate, and one candidate can never read or change another's data: a foreign id
 answers `404` (see [Authentication and access control](#authentication-and-access-control)).
@@ -72,6 +76,8 @@ backend/
   app/api/routes/health.py     GET /api/health
   app/api/routes/candidates.py Read, edit and delete your own profile
   app/api/routes/resumes.py    Resume upload, facts review, delete
+  app/api/routes/manual_facts.py  The candidate's own facts: list, add, edit, delete
+  app/services/manual_facts.py    Cap and duplicate rules under the candidate row lock
   alembic/                     Migrations (reads DATABASE_URL via app settings)
   tests/                       pytest suite, runs against a separate test database
 frontend/
@@ -82,6 +88,7 @@ frontend/
   lib/api.ts                   The only place that calls fetch (reads NEXT_PUBLIC_API_URL)
   lib/interview.ts             Pure UI logic (status → screen, labels, fixed copy); node --test
   lib/auth.ts                  Pure auth rules (401 redirect, form validation); node --test
+  lib/profile.ts               Fact categories and the fact text rule; node --test
 ```
 
 ## Prerequisites
@@ -133,8 +140,8 @@ npm run dev                   # http://localhost:3000
 ```
 
 `/login` logs in or creates an account. The landing page then shows who is signed in (with
-**Log out**), a backend status indicator, the profile (view → edit → delete) and the resume upload
-and review card. Signed-out visitors are sent to `/login`.
+**Log out**), a backend status indicator, the profile (view → edit → delete), the "Your skills
+and projects" card for facts typed in by hand, and the resume upload and review card. Signed-out visitors are sent to `/login`.
 
 ## Authentication API
 
@@ -297,8 +304,8 @@ Each row in `candidate_facts` records where it came from:
 - **Only `APPROVED` facts are trusted candidate context** (PRD trust levels 1–2). Later phases
   must read only those; `PENDING_REVIEW` is untrusted level 3.
 - Conflicts are never resolved automatically. Each upload creates a **new** resume with its
-  own facts to review; existing resumes and decisions are not touched. (There is no manual
-  skills profile yet for resume facts to conflict with.)
+  own facts to review; existing resumes and decisions are not touched. A resume fact equal to a
+  manual fact is listed for review like any other; nothing is merged.
 
 ### Resume content is untrusted data
 
@@ -339,6 +346,29 @@ curl -b jar -H "Origin: http://localhost:3000" \
 ```
 
 Raw resume text and section contents are stored but deliberately **not returned** by the API.
+
+### Manual profile facts
+
+Phase 13 ([docs/phase-13-manual-profile-plan.md](docs/phase-13-manual-profile-plan.md)). A
+candidate can type facts in (PRD §18 level 1), for example when their resume can't be read: an
+unreadable resume links to the "Your skills and projects" card.
+
+| Method & path | Result |
+|---|---|
+| `GET /api/candidates/{id}/manual-facts` | `200` the candidate's manual facts, by category then text |
+| `POST /api/candidates/{id}/manual-facts` `{category, fact}` | `201`, `APPROVED` at once · `409` exact duplicate (same category, text ignoring case, of a manual or non-rejected resume fact) or more than 100 manual facts · `422` |
+| `PATCH /api/manual-facts/{fact_id}` `{fact}` | `200`; only the text changes, `extracted_fact` keeps the original · `409` duplicate · `422` |
+| `DELETE /api/manual-facts/{fact_id}` | `204` |
+
+- **Storage:** manual facts live in `candidate_facts` with `source = MANUAL` and no resume
+  provenance (`resume_id`, `source_section`, `source_text`, `extracted_by` all NULL, enforced by
+  a CHECK).
+- **Cascades:** deleting a resume leaves them; deleting the candidate removes them.
+- **Planning:** the planner and interviewer read approved facts by candidate, so manual facts are
+  planned, grounded and revalidated (D8) exactly like approved resume facts. Editing or deleting
+  one makes the topics that cite it ineligible.
+- **Access:** owner only (`404` otherwise), Origin-checked like every write.
+- **Privacy:** never sent to a model by these routes, never logged.
 
 ### Authentication and access control
 
@@ -1246,3 +1276,4 @@ Adding a model:
 | `3871903c395d` | Allow finish reason `NO_ELIGIBLE_TOPIC`. Downgrade **refuses** while a session has it (no older reason is true for it) |
 | `3a4785ecf08e` | Evaluator: `answer_evaluations` (one per answer, cascades), `answer_evaluation_criteria` (CHECKed criterion names, scores 1–5, evidence behind every score), answer statuses `NOT_APPLICABLE` / `OBSERVATIONS_ONLY` / `EVALUATED`; allow `ANSWER_EVALUATION` calls. Downgrade **refuses** while any evaluation or evaluation status exists |
 | `5c0e1d2f7a91` | Authentication: `candidates.password_hash` (NULL = cannot log in), `failed_logins` (CHECK >= 0), `locked_until`; `auth_sessions` (SHA-256 token hash PK, `ON DELETE CASCADE` from candidates, indexed `candidate_id`, CHECK `expires_at > created_at`). Downgrade **refuses** while any candidate has a password; sessions are dropped |
+| `70b0b7891bc0` | Manual facts: `candidate_facts.source` allows `MANUAL`; resume provenance columns nullable only for manual facts (CHECK `provenance_matches_source`: a manual fact has none and is `APPROVED`, a resume fact has all); partial unique index `uq_candidate_facts_manual_fact` on `(candidate_id, category, lower(fact))`. Downgrade **refuses** while any manual fact exists |
