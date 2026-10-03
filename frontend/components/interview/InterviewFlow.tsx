@@ -26,6 +26,7 @@ import InterviewFeedback from "@/components/interview/InterviewFeedback";
 import InterviewReport from "@/components/interview/InterviewReport";
 import { PlanForm, ProfileConfirm, ReadyScreen } from "@/components/interview/InterviewSetup";
 import InterviewTurn from "@/components/interview/InterviewTurn";
+import { useExpressionCamera } from "@/components/interview/useExpressionCamera";
 
 /** The session on screen: its id and the status the server last reported. */
 type Active = { id: string; status: InterviewStatus };
@@ -44,6 +45,8 @@ function Flow({ candidate }: { candidate: Candidate }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const screenRef = useRef<HTMLElement>(null);
+  // Optional camera: lives here so a pause keeps it, and is released whenever it is not needed.
+  const camera = useExpressionCamera();
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setError(null);
@@ -62,6 +65,11 @@ function Flow({ candidate }: { candidate: Candidate }) {
   }, [load]);
 
   const screen = active ? screenFor(active.status) : null;
+  const cameraScreen = screen === "ready" || screen === "turn" || screen === "paused";
+  const { disable: releaseCamera, state: cameraState } = camera;
+  useEffect(() => {
+    if (!cameraScreen && cameraState !== "off") releaseCamera();
+  }, [cameraScreen, cameraState, releaseCamera]);
   useEffect(() => {
     // A new screen: move focus to its heading so keyboard and screen-reader users follow along.
     screenRef.current?.querySelector<HTMLElement>("[data-screen-heading]")?.focus();
@@ -183,11 +191,11 @@ function Flow({ candidate }: { candidate: Candidate }) {
       {screen === "plan" && <PlanForm sessionId={active.id} onStatus={onStatus} />}
       {screen === "ready" && (
         <ReadyScreen sessionId={active.id} onStatus={onStatus} candidateName={candidate.name}
-                     attempt={attempt} />
+                     attempt={attempt} camera={camera} />
       )}
       {(screen === "turn" || screen === "paused") && (
         <InterviewTurn sessionId={active.id} paused={screen === "paused"} onStatus={onStatus}
-                       draft={draft} setDraft={setDraft} />
+                       draft={draft} setDraft={setDraft} camera={camera} />
       )}
       {screen === "feedback" && (
         <InterviewFeedback

@@ -244,6 +244,14 @@ export const COPY = {
   resumePrompt: "You have an unfinished interview.",
   startNew: "Start a new interview to practise.",
   aiWorded: "Worded with AI assistance",
+  cameraTitle: "Facial-expression observation (optional, experimental)",
+  cameraExplain:
+    "If you turn this on, your camera is used only to look for broad facial-expression patterns " +
+    "(such as neutral or smiling) while you answer. The analysis runs on this device: images and " +
+    "video never leave your browser and are never stored. Only how many times each expression " +
+    "was detected for each question is saved with this interview, to show in your report. It is " +
+    "not a measurement of emotion, confidence or honesty and never affects your feedback. It is " +
+    "off by default; you can turn it off at any time, and the interview works the same without it.",
 } as const;
 
 export const fill = (text: string, values: Record<string, string | number>) =>

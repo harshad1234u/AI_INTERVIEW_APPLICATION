@@ -1,4 +1,5 @@
 import { LOGIN_PATH, shouldRedirectToLogin } from "@/lib/auth";
+import type { Observation } from "@/lib/expressions";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
@@ -472,6 +473,12 @@ export type InterviewReport = {
   retry: { available: boolean; note: string };
   score_scale: Record<string, string>;
   limitations: string;
+  /** Optional, experimental camera observations: never part of any score. */
+  expression_signals: {
+    available: boolean;
+    note: string;
+    questions: { question_id: string; seq: number; summary: string }[];
+  };
 };
 
 export type ReportResult = { session_id: string; status: InterviewStatus; report: InterviewReport };
@@ -531,6 +538,13 @@ export const evaluateAnswer = (id: string, questionId: string) =>
     `${sessionPath(id)}/questions/${encodeURIComponent(questionId)}/evaluation`,
     post(),
   );
+
+/** Counts only, from this browser's expression model, for one answered question. */
+export const saveExpressionObservation = (id: string, questionId: string, observation: Observation) =>
+  request<void>(`${sessionPath(id)}/questions/${encodeURIComponent(questionId)}/expressions`, {
+    method: "PUT",
+    body: JSON.stringify(observation),
+  });
 
 export const generateReport = (id: string) =>
   request<ReportResult>(`${sessionPath(id)}/report`, post());

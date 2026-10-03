@@ -15,6 +15,8 @@ const SHOTS = join(OUT, "shots");
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(DOWNLOADS, { recursive: true });
 mkdirSync(SHOTS, { recursive: true });
+// A fake webcam showing one face (see e2e/camera_feeds.py; needs Pillow on E2E_FEED_PYTHON).
+execFileSync(process.env.E2E_FEED_PYTHON ?? "python", [join(DIR, "camera_feeds.py")]);
 const PYTHON = process.env.E2E_PYTHON ?? join(DIR, "..", "backend", ".venv", "Scripts", "python.exe");
 const EDGE = process.env.E2E_EDGE ?? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const APP = "http://localhost:3000";
@@ -48,7 +50,9 @@ class ApiSession {
 // ---------- browser ----------
 const profile = join(OUT, "edge-profile");
 const edge = spawn(EDGE, ["--headless=new", "--remote-debugging-port=9223", "--disable-gpu",
-  "--no-first-run", `--user-data-dir=${profile}`, "--window-size=1280,900", "about:blank"], { stdio: "ignore" });
+  "--no-first-run", `--user-data-dir=${profile}`, "--window-size=1280,900",
+  "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
+  `--use-file-for-fake-video-capture=${join(OUT, "face.mjpeg")}`, "about:blank"], { stdio: "ignore" });
 let target;
 for (let i = 0; i < 75 && !target; i++) {
   await sleep(200);
@@ -63,6 +67,7 @@ const pending = new Map();
 const consoleLines = [];
 const dialogs = [];
 const requests = [];
+const fetched = []; // every URL the page loads (to see what the camera feature downloads)
 ws.addEventListener("message", (e) => {
   const m = JSON.parse(e.data);
   if (m.id && pending.has(m.id)) {
@@ -76,7 +81,8 @@ ws.addEventListener("message", (e) => {
   } else if (m.method === "Page.javascriptDialogOpening") {
     dialogs.push(m.params.message);
     send("Page.handleJavaScriptDialog", { accept: true });
-  } else if (m.method === "Network.requestWillBeSent" && m.params.request.url.startsWith(API)) {
+  } else if (m.method === "Network.requestWillBeSent" && (fetched.push(m.params.request.url), true)
+             && m.params.request.url.startsWith(API)) {
     requests.push({ url: m.params.request.url, method: m.params.request.method, body: m.params.request.postData ?? "" });
   }
 });
@@ -176,6 +182,46 @@ await send("Page.enable");
 await send("Runtime.enable");
 await send("Network.enable");
 await send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: DOWNLOADS });
+// Keep a handle on every camera stream the page opens (to check they are really stopped), and
+// let a check choose what the camera does, exactly as a browser reports it: "deny" and
+// "nocamera" reject like a refused prompt or a missing device; "blank" (no face) and "faces"
+// (three faces) are canvas streams; "real" is Edge's fake webcam with one face.
+const FACES = readFileSync(join(OUT, "faces.jpg")).toString("base64");
+await send("Page.addScriptToEvaluateOnNewDocument", { source: `
+  window.__streams = []; window.__cameraMode = "real";
+  const original = navigator.mediaDevices?.getUserMedia?.bind(navigator.mediaDevices);
+  if (original) navigator.mediaDevices.getUserMedia = async (c) => {
+    const mode = window.__cameraMode;
+    if (mode === "deny") throw new DOMException("Permission denied", "NotAllowedError");
+    if (mode === "nocamera") throw new DOMException("Requested device not found", "NotFoundError");
+    let stream;
+    if (mode === "real") stream = await original(c);
+    else {
+      const canvas = Object.assign(document.createElement("canvas"), { width: 640, height: 480 });
+      const ctx = canvas.getContext("2d");
+      const draw = (img) => { ctx.fillStyle = "#777"; ctx.fillRect(0, 0, 640, 480); if (img) ctx.drawImage(img, 0, 0, 640, 480); };
+      draw(null);
+      if (mode === "faces") { const img = new Image(); img.onload = () => draw(img); img.src = "data:image/jpeg;base64,${FACES}"; }
+      setInterval(() => ctx.fillRect(0, 0, 1, 1), 200); // keep frames coming
+      stream = canvas.captureStream(5);
+    }
+    window.__streams.push(stream); return stream; };` });
+const cameraMode = (mode) => js(`window.__cameraMode = ${JSON.stringify(mode)}`);
+const liveTracks = () => js("window.__streams.flatMap(s => s.getTracks()).filter(t => t.readyState === 'live').length");
+// Browser-level commands (camera permission) go to the browser target.
+const browserWs = new WebSocket((await (await fetch("http://127.0.0.1:9223/json/version")).json()).webSocketDebuggerUrl);
+await new Promise((r) => browserWs.addEventListener("open", r, { once: true }));
+let browserId = 100000;
+function browserSend(method, params) {
+  const id = ++browserId;
+  browserWs.send(JSON.stringify({ id, method, params }));
+  return new Promise((resolve, reject) => browserWs.addEventListener("message", function on(e) {
+    const m = JSON.parse(e.data);
+    if (m.id !== id) return;
+    browserWs.removeEventListener("message", on);
+    m.error ? reject(new Error(m.error.message)) : resolve(m.result);
+  }));
+}
 
 // Start clean: earlier runs (or other local testing) may have used this network's sign-up quota.
 console.log(db("cleanup", PREFIX));
@@ -292,6 +338,25 @@ try {
     return detail;
   });
 
+  // ---------- camera: optional, local, lazy ----------
+  await check("camera is optional and off: explained, nothing loaded until enabled", async () => {
+    await waitText("Facial-expression observation (optional, experimental)");
+    await waitText("images and video never leave your browser");
+    await waitText("Camera: Off");
+    await waitText("Start interview without camera");
+    if (fetched.some((u) => u.includes("/models/face-api"))) throw new Error("model loaded before consent");
+    if (await liveTracks()) throw new Error("camera open before consent");
+  });
+  await check("enable the camera → preview, local model, live expression", async () => {
+    await click("Enable camera");
+    await waitText("Expression analysis: Active", 60000);
+    await waitFor("document.querySelector('.camera-status')?.innerText.includes('Expression: Mostly')", "a live expression", 30000);
+    const models = fetched.filter((u) => u.includes("/models/face-api")).map((u) => u.split("/").pop());
+    const apiCalls = requests.filter((r) => r.url.includes("expression")).length;
+    await shot("08-camera-ready");
+    return `${await js("document.querySelector('.camera-status').innerText")}; loaded ${models.join(", ")}; ${apiCalls} API calls`;
+  });
+
   // ---------- 14-19: the interview ----------
   let q;
   await check("start the interview → first question and the server's timer", async () => {
@@ -301,6 +366,7 @@ try {
     return q;
   });
   await check("answer → adaptive follow-up (fixed wording, the reason shown)", async () => {
+    await sleep(8000); // let the camera sample this question
     await typeInto("#answer", ANSWER);
     await click("Submit answer");
     q = await nextQuestion(q);
@@ -332,6 +398,25 @@ try {
     await click("Skip");
     q = await nextQuestion(q);
     return q;
+  });
+  await check("camera sends counts only, per answered question", async () => {
+    const sent = requests.filter((r) => r.method === "PUT" && r.url.endsWith("/expressions"));
+    if (!sent.length) throw new Error("no observation sent");
+    for (const r of sent) {
+      const body = JSON.parse(r.body);
+      const keys = Object.keys(body).sort().join(",");
+      if (keys !== "counts,multiple_faces,no_face,status") throw new Error(keys);
+      if (Object.values(body.counts).some((n) => !Number.isInteger(n))) throw new Error(r.body);
+    }
+    return `${sent.length} observations, e.g. ${sent[0].body}`;
+  });
+  await check("disable the camera mid-interview → camera released, interview continues", async () => {
+    await shot("09-camera-in-interview");
+    await click("Disable camera");
+    await waitText("Camera: Off");
+    if (await liveTracks()) throw new Error("a camera track is still live");
+    await waitFor("Boolean(document.querySelector('.question-text'))", "question still there");
+    return "0 live camera tracks";
   });
   await check("refresh mid-interview → offered Resume → the same open question", async () => {
     await send("Page.reload");
@@ -368,6 +453,9 @@ try {
   await check("evaluate each answer (consent on) → report", async () => {
     await click("Get my feedback");
     await waitText("Your interview report (interview #1)", 30000);
+    await waitText("Observed expression signals");
+    await waitText("They are not measurements of emotion, personality, confidence, honesty or suitability");
+    await waitFor("/Question #1: (Mostly|Mixed)/.test(document.body.innerText)", "question 1's signal");
     for (const s of ["Summary", "Shown clearly", "To practise", "Answer evidence", "Topics to practise",
                      "Recommended practice", "never combined"]) await waitText(s);
     await shot("04-report");
@@ -378,7 +466,8 @@ try {
     await click("Download report");
     const file = await downloaded("interview-report-1-");
     const detail = await verifyDocument(file,
-      ["Interview report #1", "Summary", "Answer evidence", PHRASE, "Recommended practice"],
+      ["Interview report #1", "Summary", "Answer evidence", PHRASE, "Recommended practice",
+       "Observed expression signals"],
       [firstSession, priyaId, "e2e-fake", "request_id"], "report.pdf");
     await goto(`${APP}/interview`);
     return detail;
@@ -394,9 +483,44 @@ try {
     retrySession = sessions.find((s) => s.retry_of_id === firstSession)?.id;
     if (!retrySession) throw new Error(JSON.stringify(sessions));
   });
+  await check("camera permission denied → clear message, camera stays off", async () => {
+    await cameraMode("deny");
+    await click("Enable camera");
+    await waitText("Camera permission was denied. You can continue the interview without facial-expression analysis.");
+    await waitText("Camera: Off");
+    if (await liveTracks()) throw new Error("a camera track is live");
+  });
+  await check("no camera on the device → clear message", async () => {
+    await cameraMode("nocamera");
+    await click("Enable camera");
+    await waitText("No camera was found. You can continue the interview without facial-expression analysis.");
+  });
+  await check("expression model cannot load → 'unavailable', camera released", async () => {
+    await cameraMode("real");
+    await send("Network.setCacheDisabled", { cacheDisabled: true });
+    await send("Network.setBlockedURLs", { urls: ["*models/face-api*"] });
+    await click("Enable camera");
+    await waitText("Facial-expression analysis is unavailable (the model could not be loaded). The interview will continue normally.", 30000);
+    await waitText("Expression analysis: Unavailable");
+    if (await liveTracks()) throw new Error("a camera track is still live");
+    await send("Network.setBlockedURLs", { urls: [] });
+  });
+  await check("several faces → not analysed", async () => {
+    await cameraMode("faces");
+    await click("Try the camera again");
+    await waitFor("document.querySelector('.camera-status')?.innerText.includes('More than one face: not analysed')", "multiple faces", 60000);
+    await click("Disable camera");
+  });
+  await check("no face in view → 'No face detected'; the interview runs normally", async () => {
+    await cameraMode("blank");
+    await click("Enable camera");
+    await waitFor("document.querySelector('.camera-status')?.innerText.includes('No face detected')", "no face", 60000);
+    await shot("10-camera-no-face");
+  });
   await check("complete the retry (end early) → its own report, labelled as a retry", async () => {
     await click("Start interview");
     q = await nextQuestion(null);
+    await sleep(8000); // the camera samples an empty view
     await typeInto("#answer", ANSWER);
     await click("Submit answer");
     await nextQuestion(q);
@@ -407,6 +531,7 @@ try {
     await click("Get my feedback");
     await waitText("Your interview report (interview #2)", 30000);
     await waitText("A retry of interview #1.");
+    await waitText("Question #1: Insufficient visual data (the face was rarely visible).");
     await waitText("You ended the interview early, so this report is partial.");
   });
   await check("history lists both attempts separately", async () => {
@@ -503,6 +628,7 @@ try {
   });
 } finally {
   ws.close();
+  browserWs.close();
   edge.kill();
   const cleanup = (() => { try { return db("cleanup", PREFIX); } catch (e) { return e.message; } })();
   const passed = results.filter((r) => r.ok).length;

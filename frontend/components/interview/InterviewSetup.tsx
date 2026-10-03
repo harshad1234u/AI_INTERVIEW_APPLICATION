@@ -34,6 +34,8 @@ import {
 import { MANUAL_LABEL } from "@/lib/profile";
 import { exportFileName, planDocument, topicDescription } from "@/lib/exportDoc";
 import ExportButtons from "@/components/interview/ExportButtons";
+import CameraPanel from "@/components/interview/CameraPanel";
+import type { Camera } from "@/components/interview/useExpressionCamera";
 
 type StepProps = { sessionId: string; onStatus: (status: InterviewStatus) => void };
 
@@ -275,9 +277,10 @@ export function PlanForm({ sessionId, onStatus }: StepProps) {
 
 // ---------- READY ----------
 
-export function ReadyScreen({ sessionId, onStatus, candidateName, attempt }: StepProps & {
+export function ReadyScreen({ sessionId, onStatus, candidateName, attempt, camera }: StepProps & {
   candidateName: string;
   attempt?: number;
+  camera: Camera;
 }) {
   const [plan, setPlan] = useState<InterviewPlan | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -345,11 +348,12 @@ export function ReadyScreen({ sessionId, onStatus, candidateName, attempt }: Ste
         </>
       )}
       <ConsentControl sessionId={sessionId} />
+      <CameraPanel camera={camera} intro />
       <p className="hint">{COPY.browserClose}</p>
       {error && <p className="form-error" role="alert">{error}</p>}
       <div className="actions">
         <button type="button" className="primary" onClick={() => run("START_INTERVIEW")} disabled={busy || !plan}>
-          {busy ? "Starting…" : "Start interview"}
+          {busy ? "Starting…" : camera.state === "off" ? "Start interview without camera" : "Start interview"}
         </button>
       </div>
     </>

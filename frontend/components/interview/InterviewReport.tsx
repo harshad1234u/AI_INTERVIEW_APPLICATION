@@ -296,6 +296,18 @@ export default function InterviewReport({ sessionId, initial, onRetry, candidate
         )}
       </section>
 
+      <section aria-labelledby="r-expressions">
+        <h3 id="r-expressions">Observed expression signals</h3>
+        <p className={r.expression_signals.available ? "hint" : undefined}>{r.expression_signals.note}</p>
+        {r.expression_signals.questions.length > 0 && (
+          <ul className="plain-list">
+            {r.expression_signals.questions.map((q) => (
+              <li key={q.question_id}>Question #{q.seq}: {q.summary}</li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <section aria-labelledby="r-scale">
         <h3 id="r-scale">Score scale</h3>
         <ul className="plain-list">

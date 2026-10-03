@@ -168,6 +168,9 @@ ${r.topics_to_practise.length ? h`<ul>${r.topics_to_practise.map((t) => h`<li>${
 ${r.recommended_practice.length ? h`<ul>${r.recommended_practice.map((p) => h`<li>${p.practice} <span class="hint">(from answer ${p.question_ids.map((id) => `#${seq.get(id)}`).join(", ")})</span></li>`)}</ul>` : nothing}
 <h2>Retry</h2>
 <p>${r.retry.note}</p>
+<h2>Observed expression signals</h2>
+<p${r.expression_signals.available ? new Html(' class="hint"') : ""}>${r.expression_signals.note}</p>
+${r.expression_signals.questions.length ? h`<ul>${r.expression_signals.questions.map((q) => h`<li>Question #${q.seq}: ${q.summary}</li>`)}</ul>` : ""}
 <h2>Score scale</h2>
 <ul>${Object.entries(r.score_scale).map(([k, v]) => h`<li>${k === "null" ? "No score" : k}: ${v}</li>`)}</ul>
 <p class="note">${r.limitations}</p>`);

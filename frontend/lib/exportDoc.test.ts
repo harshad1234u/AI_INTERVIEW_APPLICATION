@@ -66,6 +66,8 @@ const REPORT: InterviewReport = {
   retry: { available: true, note: "You can retry the topics to practise in a new interview." },
   score_scale: { "1": "Not shown", "5": "Strong", null: "Too little to judge" },
   limitations: "Practice feedback only.",
+  expression_signals: { available: true, note: "These observations describe visible patterns.",
+                        questions: [{ question_id: QUESTION_ID, seq: 1, summary: `Mostly neutral expression ${EVIL}` }] },
 };
 
 function assertInert(doc: string) {
@@ -114,10 +116,12 @@ test("the report document has every section of the report page, escaped, without
   assertInert(doc);
   for (const heading of ["Summary", "Questions", "Topics covered", "By competency", "Shown clearly",
                          "To practise", "Answer evidence", "Communication observations",
-                         "Topics to practise", "Recommended practice", "Retry", "Score scale"]) {
+                         "Topics to practise", "Recommended practice", "Retry",
+                         "Observed expression signals", "Score scale"]) {
     assert.ok(doc.includes(`>${heading}</h`), heading);
   }
-  for (const text of ["2:05 (minutes:seconds)", "4 of 5 (Good)", "caching", "It is O(1)",
+  for (const text of ["Question #1: Mostly neutral expression", "These observations describe visible patterns.",
+                      "2:05 (minutes:seconds)", "4 of 5 (Good)", "caching", "It is O(1)",
                       "(from answer #1)", "Practice feedback only.", "never combined"]) {
     assert.ok(doc.includes(text), text);
   }

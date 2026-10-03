@@ -9,8 +9,11 @@ import {
   actOnSession,
   getInterviewSession,
   nextQuestion,
+  saveExpressionObservation,
   submitAnswer,
 } from "@/lib/api";
+import CameraPanel from "@/components/interview/CameraPanel";
+import type { Camera } from "@/components/interview/useExpressionCamera";
 import {
   ANSWER_KIND_LABEL,
   ANSWER_MAX_LENGTH,
@@ -33,6 +36,7 @@ type Props = {
   // The unsent answer lives in the parent's memory only, so a pause doesn't lose it. Never stored.
   draft: string;
   setDraft: (text: string) => void;
+  camera: Camera;
 };
 
 const OTHER_KINDS: AnswerKind[] = ["CLARIFY", "DONT_KNOW", "SKIP"];
@@ -49,7 +53,7 @@ function useCountdown(turn: TurnResult | null, fetchedAt: number) {
   return turn.progress.time_remaining_seconds - Math.max(0, now - fetchedAt) / 1000;
 }
 
-export default function InterviewTurn({ sessionId, paused, onStatus, draft, setDraft }: Props) {
+export default function InterviewTurn({ sessionId, paused, onStatus, draft, setDraft, camera }: Props) {
   const [turn, setTurn] = useState<TurnResult | null>(null);
   const [fetchedAt, setFetchedAt] = useState(0); // when the server's time figure arrived
   const [busy, setBusy] = useState(false);
@@ -86,6 +90,13 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
     if (questionId) questionRef.current?.focus(); // a new question: move focus to it
   }, [questionId]);
 
+  // Camera samples belong to the open question; none are taken while paused.
+  const { setQuestion, setPaused } = camera;
+  useEffect(() => {
+    setQuestion(paused ? null : questionId ?? null);
+    setPaused(paused);
+  }, [questionId, paused, setQuestion, setPaused]);
+
   async function send(kind: AnswerKind) {
     if (!turn?.question) return;
     setBusy(true);
@@ -99,6 +110,9 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
       return;
     }
     setDraft(""); // saved by the server: only now is the local copy dropped
+    // Counts only, in the background: the interview never waits for (or fails on) the camera.
+    const observation = camera.take(turn.question.id);
+    if (observation) saveExpressionObservation(sessionId, turn.question.id, observation).catch(() => {});
     setTurn(null); // that question is answered; a failed fetch of the next one offers Try again
     await loadNext();
   }
@@ -165,6 +179,7 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
             End interview
           </button>
         </div>
+        <CameraPanel camera={camera} />
       </>
     );
   }
@@ -241,6 +256,7 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
           End interview
         </button>
       </div>
+      <CameraPanel camera={camera} />
       <p className="hint">{COPY.browserClose}</p>
     </>
   );

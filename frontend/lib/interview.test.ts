@@ -139,7 +139,8 @@ const FORBIDDEN = [
 
 test("fixed UI wording makes no judgment about the candidate", () => {
   const texts = [
-    ...Object.values(COPY), ...Object.values(ANSWER_KIND_LABEL), ...Object.values(COMPETENCY_LABEL),
+    // The camera explanation names these words only to deny them (checked below).
+    ...Object.values(COPY).filter((t) => t !== COPY.cameraExplain), ...Object.values(ANSWER_KIND_LABEL), ...Object.values(COMPETENCY_LABEL),
     ...Object.values(CRITERION_LABEL), ...Object.values(DIFFICULTY_LABEL),
     ...Object.values(EVALUATION_STATUS_LABEL), ...Object.values(FINISH_LABEL),
     ...Object.values(LEVEL_LABEL), ...Object.values(MODE_LABEL), ...Object.values(QUESTION_KIND_LABEL),
@@ -148,6 +149,9 @@ test("fixed UI wording makes no judgment about the candidate", () => {
   for (const text of texts) {
     for (const pattern of FORBIDDEN) assert.doesNotMatch(text, pattern, text);
   }
+  const [before, denial] = COPY.cameraExplain.split("It is not a measurement of ");
+  for (const pattern of FORBIDDEN) assert.doesNotMatch(before, pattern, before);
+  assert.match(denial, /^emotion, confidence or honesty and never affects your feedback\./);
 });
 
 test("every rules reason has an explanation for the candidate", () => {

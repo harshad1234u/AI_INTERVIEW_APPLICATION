@@ -477,3 +477,30 @@ ul.plain-list {
 .export-actions {
   margin: 0.5rem 0 1rem;
 }
+
+.camera {
+  border-top: 1px solid var(--border);
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+}
+
+.camera h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.25rem;
+}
+
+.camera-preview {
+  display: block;
+  width: 160px;
+  max-width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 6px;
+  transform: scaleX(-1); /* a mirror, as people expect from a webcam */
+}
+
+.camera-status {
+  font-size: 0.875rem;
+  color: var(--muted);
+  margin: 0.4rem 0;
+}
