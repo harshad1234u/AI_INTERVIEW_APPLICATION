@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.api.routes import auth, candidates, health, interview_sessions, resumes
+from app.api.routes import auth, candidates, health, interview_sessions, manual_facts, resumes
 from app.core.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.include_router(auth.router, prefix="/api")
         app.include_router(candidates.router, prefix="/api")
         app.include_router(resumes.router, prefix="/api")
+        app.include_router(manual_facts.router, prefix="/api")
         app.include_router(interview_sessions.router, prefix="/api")
     return app
 

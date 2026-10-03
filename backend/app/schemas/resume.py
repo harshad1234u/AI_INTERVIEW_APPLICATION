@@ -58,15 +58,15 @@ class FactResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    resume_id: uuid.UUID
+    resume_id: uuid.UUID | None  # None (with the other provenance fields) for a MANUAL fact
     category: FactCategory
     fact: str
-    extracted_fact: str
+    extracted_fact: str  # for a MANUAL fact: the text as first entered, kept for audit
     source: FactSource
-    source_section: str
-    source_text: str
+    source_section: str | None
+    source_text: str | None
     status: FactStatus
-    extracted_by: Extractor
+    extracted_by: Extractor | None
     created_at: datetime
 
 
@@ -92,3 +92,20 @@ class FactUpdate(PartialUpdate):
     fact: FactText | None = None
     # PENDING_REVIEW is the extractor's state; a candidate can only approve or reject.
     status: Literal[FactStatus.APPROVED, FactStatus.REJECTED] | None = None
+
+
+class ManualFactCreate(BaseModel):
+    """A fact the candidate types in (Phase 13). Same text rules as editing a resume fact."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    category: FactCategory
+    fact: FactText
+
+
+class ManualFactUpdate(BaseModel):
+    """Only the text of a manual fact can change: never its category, source or status."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fact: FactText
