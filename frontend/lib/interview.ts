@@ -9,10 +9,12 @@ import type {
   ExperienceLevel,
   FinishReason,
   InterviewMode,
+  InterviewSession,
   InterviewStatus,
   QuestionKind,
   QuestionType,
   QuestionView,
+  RulesReason,
 } from "./api";
 
 /** Which screen shows a session. Chosen from the server's status only. */
@@ -170,6 +172,35 @@ export const FINISH_LABEL: Record<FinishReason, string> = {
   CANDIDATE_ENDED: "You ended the interview.",
   NO_ELIGIBLE_TOPIC: "No question could be asked.",
 };
+
+/** Why fixed rules were used instead of AI, in the candidate's words. Never hidden. */
+export const RULES_REASON_TEXT: Record<RulesReason, string> = {
+  NOT_REQUESTED: "AI assistance was off, so fixed rules were used.",
+  NOT_CONFIGURED: "AI assistance is not available on this server, so fixed rules were used.",
+  PROVIDERS_FAILED: "The AI service did not answer in time, so fixed rules were used.",
+  OUTPUT_REJECTED: "The AI suggestion did not pass our checks, so fixed rules were used.",
+  CONSENT_WITHDRAWN: "AI assistance was turned off while it was working, so its output was discarded.",
+  QUOTA_REACHED: "The daily AI usage limit was reached, so fixed rules were used.",
+};
+
+/** A short, honest label for where an attempt stands (history list). */
+export function attemptState(status: InterviewStatus): string {
+  if (status === "COMPLETED") return "Completed";
+  if (status === "REPORT_GENERATION") return "Finished, feedback not built yet";
+  if (status === "PAUSED") return "Paused";
+  if (status === "PROFILE_REVIEW" || status === "INTERVIEW_PLANNING" || status === "CREATED" ||
+      status === "PROFILE_PROCESSING") return "Being set up";
+  if (status === "READY") return "Planned, not started";
+  return "In progress";
+}
+
+/** Attempt numbers (#1 is the oldest), from the server's creation times; ties by id. Display
+ * only: attempts are never combined, and the server keeps each one separately. */
+export function attemptNumbers(sessions: Pick<InterviewSession, "id" | "created_at">[]): Map<string, number> {
+  const ordered = [...sessions].sort((a, b) =>
+    Date.parse(a.created_at) - Date.parse(b.created_at) || (a.id < b.id ? -1 : 1));
+  return new Map(ordered.map((s, i) => [s.id, i + 1]));
+}
 
 // ---------- fixed copy (checked by the wording test) ----------
 

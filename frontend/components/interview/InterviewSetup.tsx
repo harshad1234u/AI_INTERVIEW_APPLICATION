@@ -22,16 +22,18 @@ import {
   setConsent,
 } from "@/lib/api";
 import {
-  COMPETENCY_LABEL,
   COPY,
   DIFFICULTY_LABEL,
   LEVEL_LABEL,
   MODE_LABEL,
   QUESTION_TYPE_LABEL,
   ROLE_LABEL,
+  RULES_REASON_TEXT,
   errorText,
 } from "@/lib/interview";
 import { MANUAL_LABEL } from "@/lib/profile";
+import { exportFileName, planDocument, topicDescription } from "@/lib/exportDoc";
+import ExportButtons from "@/components/interview/ExportButtons";
 
 type StepProps = { sessionId: string; onStatus: (status: InterviewStatus) => void };
 
@@ -273,7 +275,10 @@ export function PlanForm({ sessionId, onStatus }: StepProps) {
 
 // ---------- READY ----------
 
-export function ReadyScreen({ sessionId, onStatus }: StepProps) {
+export function ReadyScreen({ sessionId, onStatus, candidateName, attempt }: StepProps & {
+  candidateName: string;
+  attempt?: number;
+}) {
   const [plan, setPlan] = useState<InterviewPlan | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const { busy, error, run } = useAction(sessionId, onStatus);
@@ -309,17 +314,28 @@ export function ReadyScreen({ sessionId, onStatus }: StepProps) {
             <dt>Planned by</dt>
             <dd>{plan.source === "AI" ? "AI assistance (checked by rules)" : "Fixed rules"}</dd>
           </dl>
-          <h3>Topics</h3>
+          {plan.source === "RULES" && plan.rules_reason && plan.rules_reason !== "NOT_REQUESTED" && (
+            <p className="notice">{RULES_REASON_TEXT[plan.rules_reason]}</p>
+          )}
+          <h3>Topics, in order</h3>
           <ol className="plain-list numbered">
             {plan.topics.map((t) => (
               <li key={t.position}>
-                {t.topic}{" "}
-                <span className="hint">
-                  ({COMPETENCY_LABEL[t.competency]}, {QUESTION_TYPE_LABEL[t.question_type]})
-                </span>
+                <strong>{t.topic}</strong>
+                <br />
+                <span className="hint">{topicDescription(t)}</span>
               </li>
             ))}
           </ol>
+          <p className="hint">
+            The questions are not shown in advance. Each topic can have up to two follow-up
+            questions.
+          </p>
+          <ExportButtons
+            what="plan"
+            fileName={exportFileName("plan", new Date(), attempt)}
+            build={() => planDocument(plan, { candidateName, date: new Date(), attempt })}
+          />
           {plan.omitted_groups.length > 0 && (
             <p className="hint">
               Left out: {plan.omitted_groups.map((g) => QUESTION_TYPE_LABEL[g]).join(", ")} (no

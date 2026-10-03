@@ -10,6 +10,7 @@ import {
   getResumeFacts,
   listResumes,
   reviewFact,
+  reviewPendingFacts,
   runAiExtraction,
   uploadResume,
 } from "@/lib/api";
@@ -175,7 +176,28 @@ export default function ResumeSection({ candidateId }: { candidateId: string }) 
           {resume.status === "PROCESSED" && (
             <AiExtraction resumeId={resume.id} onDone={() => loadFacts([resume])} />
           )}
-          {facts[resume.id] && <FactList facts={facts[resume.id]} onChange={replaceFact} />}
+          {resume.sections.length > 0 && (
+            <p className="hint">
+              Sections found:{" "}
+              {resume.sections.map((s, i) => (
+                <span key={i}>
+                  {i > 0 && ", "}
+                  {s.heading}
+                  {s.category === null && " (kept, no items taken from it)"}
+                </span>
+              ))}
+            </p>
+          )}
+          {facts[resume.id] && (
+            <FactList
+              facts={facts[resume.id]}
+              onChange={replaceFact}
+              onReviewAll={async (status) => {
+                const updated = await reviewPendingFacts(resume.id, status);
+                setFacts((prev) => ({ ...prev, [resume.id]: updated }));
+              }}
+            />
+          )}
         </article>
       ))}
     </section>
@@ -233,16 +255,53 @@ function AiExtraction({ resumeId, onDone }: { resumeId: string; onDone: () => Pr
   );
 }
 
-function FactList({ facts, onChange }: { facts: Fact[]; onChange: (f: Fact) => void }) {
+type FactListProps = {
+  facts: Fact[];
+  onChange: (f: Fact) => void;
+  onReviewAll: (status: "APPROVED" | "REJECTED") => Promise<void>;
+};
+
+function FactList({ facts, onChange, onReviewAll }: FactListProps) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const counts = { PENDING_REVIEW: 0, APPROVED: 0, REJECTED: 0 };
   facts.forEach((f) => counts[f.status]++);
   if (facts.length === 0) return null;
+
+  async function reviewAll(status: "APPROVED" | "REJECTED") {
+    const question = status === "APPROVED"
+      ? `Approve all ${counts.PENDING_REVIEW} items that still need review? Check them first: ` +
+        "approved items can be used to personalise your interviews."
+      : `Reject all ${counts.PENDING_REVIEW} items that still need review?`;
+    if (!window.confirm(question)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onReviewAll(status);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <p className="hint">
         {counts.PENDING_REVIEW} need review · {counts.APPROVED} approved · {counts.REJECTED}{" "}
         rejected
       </p>
+      {counts.PENDING_REVIEW > 1 && (
+        <div className="actions">
+          <button type="button" onClick={() => reviewAll("APPROVED")} disabled={busy}>
+            Approve all {counts.PENDING_REVIEW} pending
+          </button>
+          <button type="button" onClick={() => reviewAll("REJECTED")} disabled={busy}>
+            Reject all pending
+          </button>
+        </div>
+      )}
+      {error && <p className="form-error" role="alert">{error}</p>}
       {FACT_CATEGORIES.map(([category, label]) => {
         const items = facts.filter((f) => f.category === category);
         if (items.length === 0) return null;

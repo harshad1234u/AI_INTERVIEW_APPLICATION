@@ -199,6 +199,13 @@ export const editManualFact = (factId: string, fact: string) =>
 export const deleteManualFact = (factId: string) =>
   request<void>(`/api/manual-facts/${encodeURIComponent(factId)}`, { method: "DELETE" });
 
+/** Approve (or reject) every fact of this resume that still needs review. */
+export const reviewPendingFacts = (resumeId: string, status: "APPROVED" | "REJECTED") =>
+  request<Fact[]>(`/api/resumes/${encodeURIComponent(resumeId)}/facts/review-pending`, {
+    method: "POST",
+    body: JSON.stringify({ status }),
+  });
+
 export const runAiExtraction = (resumeId: string) =>
   request<AIExtraction>(`/api/resumes/${encodeURIComponent(resumeId)}/ai-extraction`, {
     method: "POST",
@@ -239,14 +246,21 @@ export type RulesReason =
   | "NOT_CONFIGURED"
   | "PROVIDERS_FAILED"
   | "OUTPUT_REJECTED"
-  | "CONSENT_WITHDRAWN";
+  | "CONSENT_WITHDRAWN"
+  | "QUOTA_REACHED";
 
+/** One interview attempt as listed in the candidate's history: a summary, never its content. */
 export type InterviewSession = {
   id: string;
   candidate_id: string;
   status: InterviewStatus;
   created_at: string;
   updated_at: string;
+  finish_reason: FinishReason | null;
+  /** The completed interview this one retries; null for a first attempt or a deleted source. */
+  retry_of_id: string | null;
+  settings: PlanSettings | null; // null until planned
+  plan_source: Source | null;
 };
 
 export type TargetRole = "SOFTWARE_DEVELOPER_INTERN";

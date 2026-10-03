@@ -24,11 +24,17 @@ import {
   formatRemaining,
   seqById,
 } from "@/lib/interview";
+import { exportFileName, reportDocument } from "@/lib/exportDoc";
+import ExportButtons from "@/components/interview/ExportButtons";
 
 type Props = {
   sessionId: string;
   initial: ReportResult | null;
   onRetry: (view: InterviewPlanView) => void;
+  candidateName: string;
+  attempt?: number;
+  /** The attempt this one retries, when known: "Retry of interview #n". */
+  retryOf?: number;
 };
 
 /** Quotes are the candidate's own words, rendered as plain text. */
@@ -47,7 +53,8 @@ function Score({ score, meaning }: { score: number | null; meaning?: string }) {
   return <span>{score} of 5{meaning && ` (${meaning})`}</span>;
 }
 
-export default function InterviewReport({ sessionId, initial, onRetry }: Props) {
+export default function InterviewReport({ sessionId, initial, onRetry, candidateName, attempt,
+                                          retryOf }: Props) {
   const [result, setResult] = useState<ReportResult | null>(initial);
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -84,8 +91,16 @@ export default function InterviewReport({ sessionId, initial, onRetry }: Props) 
 
   return (
     <>
-      <h2 tabIndex={-1} data-screen-heading>Your interview report</h2>
+      <h2 tabIndex={-1} data-screen-heading>
+        Your interview report{attempt ? ` (interview #${attempt})` : ""}
+      </h2>
+      {retryOf && <p className="hint">A retry of interview #{retryOf}.</p>}
       <p className="hint">{COPY.reportIntro}</p>
+      <ExportButtons
+        what="report"
+        fileName={exportFileName("report", new Date(), attempt)}
+        build={() => reportDocument(r, { candidateName, date: new Date(), attempt })}
+      />
 
       <section aria-labelledby="r-summary">
         <h3 id="r-summary">Summary</h3>

@@ -15,6 +15,9 @@ import {
   QUESTION_KIND_LABEL,
   QUESTION_TYPE_LABEL,
   SCREEN,
+  RULES_REASON_TEXT,
+  attemptNumbers,
+  attemptState,
   answerLength,
   canRetry,
   errorText,
@@ -145,4 +148,30 @@ test("fixed UI wording makes no judgment about the candidate", () => {
   for (const text of texts) {
     for (const pattern of FORBIDDEN) assert.doesNotMatch(text, pattern, text);
   }
+});
+
+test("every rules reason has an explanation for the candidate", () => {
+  const reasons = ["NOT_REQUESTED", "NOT_CONFIGURED", "PROVIDERS_FAILED", "OUTPUT_REJECTED",
+                   "CONSENT_WITHDRAWN", "QUOTA_REACHED"] as const;
+  assert.deepEqual(Object.keys(RULES_REASON_TEXT).sort(), [...reasons].sort());
+  for (const r of reasons) assert.ok(RULES_REASON_TEXT[r].endsWith("."));
+});
+
+test("attempts are numbered oldest first, ties broken by id, whatever the list order", () => {
+  const sessions = [
+    { id: "c", created_at: "2026-10-03T10:00:02.5+00:00" },
+    { id: "b", created_at: "2026-10-03T10:00:01Z" },
+    { id: "a", created_at: "2026-10-03T10:00:01.000000Z" },
+  ];
+  assert.deepEqual([...attemptNumbers(sessions)], [["a", 1], ["b", 2], ["c", 3]]);
+  assert.deepEqual([...attemptNumbers([])], []);
+});
+
+test("attempt states are plain words for every status", () => {
+  for (const status of Object.keys(SCREEN) as InterviewStatus[]) {
+    assert.ok(attemptState(status).length > 0, status);
+  }
+  assert.equal(attemptState("COMPLETED"), "Completed");
+  assert.equal(attemptState("WAITING_FOR_ANSWER"), "In progress");
+  assert.equal(attemptState("READY"), "Planned, not started");
 });

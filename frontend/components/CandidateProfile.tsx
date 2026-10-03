@@ -167,12 +167,13 @@ function Profile({ candidate }: { candidate: Candidate }) {
       <ManualFactsSection key={`manual-${candidate.id}`} candidateId={candidate.id} />
       <ResumeSection key={candidate.id} candidateId={candidate.id} />
       <section className="card" aria-labelledby="interview-heading">
-        <h2 id="interview-heading">Practice interview</h2>
+        <h2 id="interview-heading">Practice interviews</h2>
         <p className="hint">
-          Once you have reviewed your resume facts, start or continue a text interview.
+          When your details above are ready (added by you, or approved from your resume), plan and
+          take a text interview, then see your feedback and your past interviews.
         </p>
         <Link className="button-link" href="/interview">
-          Go to your interview
+          Go to your interviews
         </Link>
       </section>
     </>

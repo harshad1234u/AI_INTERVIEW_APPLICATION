@@ -17,6 +17,7 @@ import {
   ANSWER_WARN_AT,
   COPY,
   QUESTION_KIND_LABEL,
+  RULES_REASON_TEXT,
   answerLength,
   errorText,
   formatRemaining,
@@ -196,6 +197,10 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
             </p>
             <p className="question-text" ref={questionRef} tabIndex={-1}>{q.text}</p>
             {q.source === "AI" && <p className="hint">{COPY.aiWorded}</p>}
+            {q.source === "RULES" && q.kind !== "TOPIC" && q.rules_reason &&
+              q.rules_reason !== "NOT_REQUESTED" && q.rules_reason !== "NOT_CONFIGURED" && (
+              <p className="hint">{RULES_REASON_TEXT[q.rules_reason]}</p>
+            )}
           </div>
           <div className="field">
             <label htmlFor="answer">Your answer</label>

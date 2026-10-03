@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  type Candidate,
   type InterviewSession,
   type InterviewStatus,
   type ReportResult,
@@ -10,7 +11,17 @@ import {
   listInterviewSessions,
 } from "@/lib/api";
 import { SignedIn } from "@/components/AuthProvider";
-import { COPY, errorText, isUnfinished, screenFor } from "@/lib/interview";
+import {
+  COPY,
+  DIFFICULTY_LABEL,
+  FINISH_LABEL,
+  MODE_LABEL,
+  attemptNumbers,
+  attemptState,
+  errorText,
+  isUnfinished,
+  screenFor,
+} from "@/lib/interview";
 import InterviewFeedback from "@/components/interview/InterviewFeedback";
 import InterviewReport from "@/components/interview/InterviewReport";
 import { PlanForm, ProfileConfirm, ReadyScreen } from "@/components/interview/InterviewSetup";
@@ -20,11 +31,11 @@ import InterviewTurn from "@/components/interview/InterviewTurn";
 type Active = { id: string; status: InterviewStatus };
 
 export default function InterviewFlow() {
-  return <SignedIn>{(candidate) => <Flow candidateId={candidate.id} />}</SignedIn>;
+  return <SignedIn>{(candidate) => <Flow candidate={candidate} />}</SignedIn>;
 }
 
-/** The signed-in candidate's interviews. candidateId comes from GET /api/auth/me, never storage. */
-function Flow({ candidateId }: { candidateId: string }) {
+/** The signed-in candidate's interviews. The candidate comes from GET /api/auth/me, never storage. */
+function Flow({ candidate }: { candidate: Candidate }) {
   const [sessions, setSessions] = useState<InterviewSession[] | null>(null);
   const [active, setActive] = useState<Active | null>(null);
   const [report, setReport] = useState<ReportResult | null>(null);
@@ -37,11 +48,11 @@ function Flow({ candidateId }: { candidateId: string }) {
   const load = useCallback(async (signal?: AbortSignal) => {
     setError(null);
     try {
-      setSessions(await listInterviewSessions(candidateId, signal));
+      setSessions(await listInterviewSessions(candidate.id, signal));
     } catch (err) {
       if (!signal?.aborted) setError(errorText(err));
     }
-  }, [candidateId]);
+  }, [candidate.id]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -71,7 +82,9 @@ function Flow({ candidateId }: { candidateId: string }) {
     setBusy(true);
     setError(null);
     try {
-      open(await createInterviewSession());
+      const session = await createInterviewSession();
+      open(session);
+      load(); // the new attempt gets its number in the history
     } catch (err) {
       setError(errorText(err)); // e.g. 409: an unfinished session exists (the server's message)
       await load();
@@ -110,58 +123,68 @@ function Flow({ candidateId }: { candidateId: string }) {
     load();
   }
 
+  const numbers = attemptNumbers(sessions ?? []);
   const errorBox = error && <p className="form-error" role="alert">{error}</p>;
 
   if (!active) {
     const unfinished = sessions?.find((s) => isUnfinished(s.status));
-    const lastCompleted = sessions?.find((s) => s.status === "COMPLETED");
     return (
-      <section className="card" aria-labelledby="sessions-heading">
-        <h2 id="sessions-heading">Your interview</h2>
-        {errorBox}
-        {sessions === null && !error && <p>Loading your interviews…</p>}
-        {sessions === null && error && (
-          <div className="actions"><button type="button" onClick={() => load()}>Retry</button></div>
-        )}
-        {sessions && unfinished && (
-          <>
-            <p>{COPY.resumePrompt} Started {new Date(unfinished.created_at).toLocaleString()}.</p>
-            <div className="actions">
-              <button type="button" className="primary" onClick={() => open(unfinished)} disabled={busy}>
-                Resume
-              </button>
-              <button type="button" className="danger" onClick={() => discard(unfinished.id)} disabled={busy}>
-                Discard
-              </button>
-            </div>
-          </>
-        )}
-        {sessions && !unfinished && (
-          <>
-            <p>{COPY.startNew}</p>
-            <div className="actions">
-              <button type="button" className="primary" onClick={startNew} disabled={busy}>
-                {busy ? "Starting…" : "Start a new interview"}
-              </button>
-              {lastCompleted && (
-                <button type="button" onClick={() => open(lastCompleted)} disabled={busy}>
-                  View your last report
+      <>
+        <section className="card" aria-labelledby="sessions-heading">
+          <h2 id="sessions-heading">Your interview</h2>
+          {errorBox}
+          {sessions === null && !error && <p>Loading your interviews…</p>}
+          {sessions === null && error && (
+            <div className="actions"><button type="button" onClick={() => load()}>Retry</button></div>
+          )}
+          {sessions && unfinished && (
+            <>
+              <p>
+                {COPY.resumePrompt} Interview #{numbers.get(unfinished.id)}, started{" "}
+                {new Date(unfinished.created_at).toLocaleString()}.
+              </p>
+              <div className="actions">
+                <button type="button" className="primary" onClick={() => open(unfinished)} disabled={busy}>
+                  Resume
                 </button>
-              )}
-            </div>
-          </>
+                <button type="button" className="danger" onClick={() => discard(unfinished.id)} disabled={busy}>
+                  Discard
+                </button>
+              </div>
+            </>
+          )}
+          {sessions && !unfinished && (
+            <>
+              <p>{COPY.startNew}</p>
+              <div className="actions">
+                <button type="button" className="primary" onClick={startNew} disabled={busy}>
+                  {busy ? "Starting…" : "Start a new interview"}
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+        {sessions && sessions.length > 0 && (
+          <History sessions={sessions} numbers={numbers} busy={busy} onOpen={open} onDelete={discard} />
         )}
-      </section>
+      </>
     );
   }
+
+  const attempt = numbers.get(active.id);
+  const listed = sessions?.find((s) => s.id === active.id);
+  const retryOf = listed?.retry_of_id ? numbers.get(listed.retry_of_id) : undefined;
 
   return (
     <section className="card interview" ref={screenRef} aria-label="Interview">
       {screen === "confirm" && (
-        <ProfileConfirm sessionId={active.id} candidateId={candidateId} onStatus={onStatus} />
+        <ProfileConfirm sessionId={active.id} candidateId={candidate.id} onStatus={onStatus} />
       )}
       {screen === "plan" && <PlanForm sessionId={active.id} onStatus={onStatus} />}
-      {screen === "ready" && <ReadyScreen sessionId={active.id} onStatus={onStatus} />}
+      {screen === "ready" && (
+        <ReadyScreen sessionId={active.id} onStatus={onStatus} candidateName={candidate.name}
+                     attempt={attempt} />
+      )}
       {(screen === "turn" || screen === "paused") && (
         <InterviewTurn sessionId={active.id} paused={screen === "paused"} onStatus={onStatus}
                        draft={draft} setDraft={setDraft} />
@@ -180,7 +203,13 @@ function Flow({ candidateId }: { candidateId: string }) {
           key={active.id}
           sessionId={active.id}
           initial={report}
-          onRetry={(view) => open({ id: view.session_id, status: view.status })}
+          candidateName={candidate.name}
+          attempt={attempt}
+          retryOf={retryOf}
+          onRetry={(view) => {
+            open({ id: view.session_id, status: view.status });
+            load(); // the retry is a new attempt in the history
+          }}
         />
       )}
       {errorBox}
@@ -192,6 +221,61 @@ function Flow({ candidateId }: { candidateId: string }) {
         )}
         <button type="button" onClick={leave} disabled={busy}>Back to your interviews</button>
       </div>
+    </section>
+  );
+}
+
+type HistoryProps = {
+  sessions: InterviewSession[];
+  numbers: Map<string, number>;
+  busy: boolean;
+  onOpen: (s: InterviewSession) => void;
+  onDelete: (id: string) => void;
+};
+
+/** Every attempt, newest first. Each keeps its own report: attempts are never combined. */
+function History({ sessions, numbers, busy, onOpen, onDelete }: HistoryProps) {
+  return (
+    <section className="card" aria-labelledby="history-heading">
+      <h2 id="history-heading">Your interview history</h2>
+      <p className="hint">
+        Each interview keeps its own report. A retry practises the topics a report marked to
+        practise; its results are never merged with the original&apos;s.
+      </p>
+      <ul className="history">
+        {sessions.map((s) => {
+          const n = numbers.get(s.id);
+          const source = s.retry_of_id ? numbers.get(s.retry_of_id) : undefined;
+          return (
+            <li key={s.id} className="history-item">
+              <div>
+                <strong>Interview #{n}</strong>{" "}
+                <span className="hint">{new Date(s.created_at).toLocaleString()}</span>
+                <br />
+                {s.settings
+                  ? `${MODE_LABEL[s.settings.mode]}, ${DIFFICULTY_LABEL[s.settings.difficulty]}, ` +
+                    `${s.settings.duration_minutes} minutes`
+                  : "Not planned yet"}
+                {" · "}
+                <span className="badge">{attemptState(s.status)}</span>
+                {source && <span className="hint"> · retry of interview #{source}</span>}
+                {s.retry_of_id && !source && <span className="hint"> · a retry</span>}
+                {s.finish_reason && <><br /><span className="hint">{FINISH_LABEL[s.finish_reason]}</span></>}
+              </div>
+              <div className="actions">
+                <button type="button" onClick={() => onOpen(s)} disabled={busy}
+                        aria-label={`${s.status === "COMPLETED" ? "View the report of" : "Continue"} interview #${n}`}>
+                  {s.status === "COMPLETED" ? "View report" : "Continue"}
+                </button>
+                <button type="button" className="danger" onClick={() => onDelete(s.id)} disabled={busy}
+                        aria-label={`Delete interview #${n}`}>
+                  Delete
+                </button>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }
