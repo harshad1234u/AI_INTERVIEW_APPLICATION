@@ -62,8 +62,7 @@ def create_retry(db: Session, source_id: uuid.UUID) -> tuple[InterviewSession, I
     new_plan = retry_plan(plan, kept)
     # The normal lifecycle: the one-active-session index, the pending-facts check and PLAN_READY.
     # The new session's AI consent is its own column default (false); nothing is copied.
-    session = create_session(db, source.candidate_id)
-    session.retry_of_id = source.id
+    session = create_session(db, source.candidate_id, retry_of_id=source.id)
     apply_event(db, session.id, SessionEvent.CONFIRM_PROFILE)
     session = apply_event(db, session.id, SessionEvent.PLAN_READY,
                           plan=new_plan.model_dump(mode="json"))

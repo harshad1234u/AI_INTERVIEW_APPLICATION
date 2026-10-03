@@ -1,6 +1,7 @@
 """Usage limits (abuse and cost controls): window math, the atomic counter, every limited route,
 the deterministic fallback when an AI quota is reached, and real concurrency."""
 
+import re
 import threading
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -150,6 +151,7 @@ def test_login_is_limited_per_network_before_any_password_is_checked(
     # The same answer whether or not the email exists, and no password was hashed for either.
     assert (known.status_code, known.json()) == (unknown.status_code, unknown.json())
     assert known.status_code == 429 and "Retry-After" in known.headers
+    assert re.search(r"Please try again in (1 minute|([2-9]|1[0-5]) minutes)\.$", known.json()["detail"])
     assert len(checks) == 3
     # Throttled attempts never reached the account: its failure count is unchanged.
     assert db_session.scalar(select(Candidate.failed_logins)

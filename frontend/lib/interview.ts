@@ -177,7 +177,7 @@ export const FINISH_LABEL: Record<FinishReason, string> = {
 export const RULES_REASON_TEXT: Record<RulesReason, string> = {
   NOT_REQUESTED: "AI assistance was off, so fixed rules were used.",
   NOT_CONFIGURED: "AI assistance is not available on this server, so fixed rules were used.",
-  PROVIDERS_FAILED: "The AI service did not answer in time, so fixed rules were used.",
+  PROVIDERS_FAILED: "The AI service could not be used just now, so fixed rules were used.",
   OUTPUT_REJECTED: "The AI suggestion did not pass our checks, so fixed rules were used.",
   CONSENT_WITHDRAWN: "AI assistance was turned off while it was working, so its output was discarded.",
   QUOTA_REACHED: "The daily AI usage limit was reached, so fixed rules were used.",

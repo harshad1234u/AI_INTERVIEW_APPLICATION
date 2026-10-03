@@ -143,8 +143,11 @@ def next_status(status: object, event: object) -> InterviewStatus:
         raise InvalidTransition(status, event) from None
 
 
-def create_session(db: Session, candidate_id: uuid.UUID) -> InterviewSession:
-    """New session for an existing candidate, persisted in PROFILE_REVIEW.
+def create_session(db: Session, candidate_id: uuid.UUID,
+                   retry_of_id: uuid.UUID | None = None) -> InterviewSession:
+    """New session for an existing candidate, persisted in PROFILE_REVIEW. `retry_of_id` links a
+    retry to the interview it retries; it is part of the INSERT, so a later row reload
+    (apply_event's populate_existing) cannot drop it.
 
     Profile processing is candidate-level and synchronous today, so the session has no work of
     its own in CREATED or PROFILE_PROCESSING: both transitions are applied before the insert.
@@ -152,7 +155,7 @@ def create_session(db: Session, candidate_id: uuid.UUID) -> InterviewSession:
     status = S.CREATED
     for event in (E.PROFILE_PROCESSING_STARTED, E.PROFILE_READY):
         status = next_status(status, event)
-    session = InterviewSession(candidate_id=candidate_id, status=status)
+    session = InterviewSession(candidate_id=candidate_id, status=status, retry_of_id=retry_of_id)
     try:
         with db.begin_nested():  # a duplicate rolls back to here; the transaction stays usable
             db.add(session)

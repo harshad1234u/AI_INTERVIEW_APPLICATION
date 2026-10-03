@@ -35,10 +35,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 BAD_CREDENTIALS = "Email or password is incorrect."
 LOCKED = "Too many failed attempts. Please try again in 15 minutes."
 THROTTLED = {
-    REGISTER.scope: "Too many accounts were created from your network. Please try again in "
-                    "{minutes} minutes.",
-    LOGIN.scope: "Too many sign-in attempts from your network. Please try again in {minutes} "
-                 "minutes.",
+    REGISTER.scope: "Too many accounts were created from your network. Please try again in {when}.",
+    LOGIN.scope: "Too many sign-in attempts from your network. Please try again in {when}.",
 }
 
 
@@ -50,8 +48,9 @@ def _throttle(db: Session, request: Request, limit: Limit) -> None:
     except LimitReached as exc:
         db.rollback()
         minutes = max(1, -(-exc.retry_after // 60))
+        when = "1 minute" if minutes == 1 else f"{minutes} minutes"
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
-                            THROTTLED[limit.scope].format(minutes=minutes),
+                            THROTTLED[limit.scope].format(when=when),
                             headers={"Retry-After": str(exc.retry_after)}) from None
     db.commit()
 

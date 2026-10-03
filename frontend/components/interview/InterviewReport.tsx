@@ -82,8 +82,14 @@ export default function InterviewReport({ sessionId, initial, onRetry, candidate
     }
   }
 
-  if (error) return <p className="form-error" role="alert">{error}</p>;
-  if (!result) return <p>Loading your report…</p>;
+  // Rendered while loading too: the flow moves focus to it as soon as the screen opens.
+  const heading = (
+    <h2 tabIndex={-1} data-screen-heading>
+      Your interview report{attempt ? ` (interview #${attempt})` : ""}
+    </h2>
+  );
+  if (error) return <>{heading}<p className="form-error" role="alert">{error}</p></>;
+  if (!result) return <>{heading}<p>Loading your report…</p></>;
   const r: Report = result.report;
   const seq = seqById(r.questions);
   const refs = (ids: string[]) => ids.map((id) => `#${seq.get(id)}`).join(", ");
@@ -91,9 +97,7 @@ export default function InterviewReport({ sessionId, initial, onRetry, candidate
 
   return (
     <>
-      <h2 tabIndex={-1} data-screen-heading>
-        Your interview report{attempt ? ` (interview #${attempt})` : ""}
-      </h2>
+      {heading}
       {retryOf && <p className="hint">A retry of interview #{retryOf}.</p>}
       <p className="hint">{COPY.reportIntro}</p>
       <ExportButtons

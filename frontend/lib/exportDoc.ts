@@ -77,8 +77,12 @@ function plannedBy(source: "AI" | "RULES", reason: keyof typeof RULES_REASON_TEX
 
 /** What a topic is about, as the candidate sees it before the interview. */
 export function topicDescription(t: PlannedTopic): string {
-  const kind = `${QUESTION_TYPE_LABEL[t.question_type]} · ${COMPETENCY_LABEL[t.competency]} · ` +
-    `${DIFFICULTY_LABEL[t.difficulty]}`;
+  const type = QUESTION_TYPE_LABEL[t.question_type];
+  const competency = COMPETENCY_LABEL[t.competency];
+  // "Behavioral · Behavioral" or a competency that is already the title says nothing new.
+  const parts = [`${type} question`, competency !== type && competency !== t.topic ? competency : null,
+                 `${DIFFICULTY_LABEL[t.difficulty]} difficulty`].filter(Boolean);
+  const kind = parts.join(" · ");
   return t.facts.length > 0
     ? `${kind} · based on your ${t.facts.map((f) => `${f.category.toLowerCase()} “${f.fact}”`).join(", ")}`
     : `${kind} · general question`;

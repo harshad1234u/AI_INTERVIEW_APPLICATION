@@ -552,6 +552,11 @@ def test_concurrent_retries_create_one_session(committed_completed: uuid.UUID) -
     assert created in refused  # the one-active-session index reports the session just made
     assert [(s[0], s[1]) for s in _candidate_sessions(sid_)] == [
         (sid_, "COMPLETED"), (uuid.UUID(created), "READY")]
+    # Through the app's own session factory (autoflush off), the link to the source is stored.
+    # Regression: it was set after the INSERT and lost when apply_event reloaded the row.
+    with SessionLocal() as db:
+        assert db.scalar(text("SELECT retry_of_id FROM interview_sessions WHERE id = :i"),
+                         {"i": created}) == sid_
 
 
 def test_a_retry_of_a_source_deleted_meanwhile(committed_completed: uuid.UUID) -> None:

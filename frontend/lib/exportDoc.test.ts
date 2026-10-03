@@ -101,8 +101,12 @@ test("the plan document never reveals ids, prepared questions or expected concep
 });
 
 test("a topic says what it is based on", () => {
-  assert.equal(topicDescription(PLAN.topics[1]), "Behavioral · Behavioral · Medium · general question");
-  assert.match(topicDescription(PLAN.topics[0]), /^Project · Project Understanding · Medium · based on your project “TrustLens /);
+  // No repetition: Behavioral is both the type and the competency here.
+  assert.equal(topicDescription(PLAN.topics[1]), "Behavioral question · Medium difficulty · general question");
+  assert.match(topicDescription(PLAN.topics[0]),
+               /^Project question · Project Understanding · Medium difficulty · based on your project “TrustLens /);
+  assert.equal(topicDescription({ ...PLAN.topics[1], question_type: "TECHNICAL", competency: "database",
+                                  topic: "Database" }), "Technical question · Medium difficulty · general question");
 });
 
 test("the report document has every section of the report page, escaped, without ids", () => {
