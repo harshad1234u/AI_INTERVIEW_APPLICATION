@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     ai_timeout_seconds: float = Field(default=20, gt=0, le=120)  # per attempt
     ai_max_retries: int = Field(default=1, ge=0, le=5)  # per provider, transient errors only
     ai_max_output_tokens: int = Field(default=8192, ge=256, le=32768)
+    # Model-backed requests admitted per UTC day, across all candidates (services/limits.py).
+    # Size it from the provider plan; 0 = every AI request uses the deterministic fallback.
+    ai_daily_request_limit: int = Field(default=2000, ge=0)
     groq_api_key: SecretStr | None = None
     groq_model: str | None = None
     gemini_api_key: SecretStr | None = None

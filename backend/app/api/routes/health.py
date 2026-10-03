@@ -22,8 +22,8 @@ class HealthResponse(BaseModel):
 def health(response: Response, db: Session = Depends(get_db)) -> HealthResponse:
     try:
         db.execute(text("SELECT 1"))
-    except SQLAlchemyError:
-        logger.exception("Health check: database unreachable")
+    except SQLAlchemyError as exc:
+        logger.error("Health check: database unreachable (%s)", type(exc).__name__)
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return HealthResponse(status="degraded", database="unavailable")
     return HealthResponse(status="ok", database="ok")

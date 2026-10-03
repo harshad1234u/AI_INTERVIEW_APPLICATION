@@ -12,6 +12,7 @@ Defence in depth against invented or injected facts:
 import logging
 import re
 import secrets
+import time
 from collections import Counter
 from dataclasses import dataclass
 
@@ -22,6 +23,8 @@ from app.models.resume import FACT_MAX_LENGTH, SECTION_MAX_LENGTH, FactCategory
 from app.services.resume_extractor import MAX_FACTS, MAX_TEXT_CHARS, ExtractedFact, normalize_text
 
 logger = logging.getLogger(__name__)
+
+EXTRACTION_SECONDS = 60.0  # longest model wait per extraction request
 
 SYSTEM_INSTRUCTION = """You extract factual items from a candidate's resume for an interview \
 practice app. You only copy information. You never judge, score, rank or approve the candidate.
@@ -119,7 +122,9 @@ async def extract_profile(gateway: ModelGateway, resume_text: str) -> ProfileRes
         user_content=f"<{tag}>\n{resume_text}\n</{tag}>",
         temperature=0.0,  # extraction should be as repeatable as the provider allows
     )
-    result = await gateway.generate_structured(request, ProfileExtraction)
+    # A hanging provider never holds the request longer than this (ModelUnavailableError).
+    result = await gateway.generate_structured(request, ProfileExtraction,
+                                               deadline=time.monotonic() + EXTRACTION_SECONDS)
     facts, rejected = ground_facts(result.output, resume_text)
     logger.info("Profile extraction %s: %d facts accepted, rejected %s",
                 result.record.request_id, len(facts), dict(rejected))

@@ -18,12 +18,24 @@ from app.db.session import get_db
 from app.models import Candidate, CandidateFact, ProviderCall, Resume
 from app.models.resume import Extractor, FactSource, ResumeStatus
 from app.schemas.resume import AIExtractionResponse, FactResponse, FactUpdate, ResumeResponse
+from app.services.limits import AI_EXTRACTION, RESUME_UPLOAD, LimitReached, charge_ai, consume
 from app.services.resume_extractor import process_pdf
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["resumes"])
 
 NOT_PDF = "Only PDF resumes are supported."
+UPLOADS_USED = (f"You have reached today's limit of {RESUME_UPLOAD.max} resume uploads. "
+                "Please try again tomorrow.")
+EXTRACTIONS_USED = (f"You have reached today's limit of {AI_EXTRACTION.max} AI extractions. "
+                    "Your resume and its facts are unchanged. Please try again tomorrow.")
+AI_BUDGET_USED = ("AI assistance has reached its daily limit on this server. Your resume and its "
+                  "facts are unchanged. Please try again tomorrow.")
+
+
+def _limit_reached(exc: LimitReached, detail: str) -> HTTPException:
+    return HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, detail,
+                         headers={"Retry-After": str(exc.retry_after)})
 
 
 def too_large_detail(settings: Settings) -> str:
@@ -89,7 +101,14 @@ def upload_resume(
 ) -> ResumeResponse:
     """For the signed-in candidate. The form carries only the file: a client-supplied candidate
     id is never trusted."""
-    result = process_pdf(_read_pdf(file, settings))
+    data = _read_pdf(file, settings)
+    try:  # charged before parsing, the expensive part; committed so a crash still counts
+        consume(db, RESUME_UPLOAD, str(candidate.id))
+    except LimitReached as exc:
+        db.rollback()
+        raise _limit_reached(exc, UPLOADS_USED) from None
+    db.commit()
+    result = process_pdf(data)
     # Resume and facts are written in one transaction with the final status: never half-processed.
     resume = Resume(
         candidate_id=candidate.id,
@@ -172,6 +191,7 @@ def run_ai_extraction(
     resume: Resume = Depends(get_resume),
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
+    settings: Settings = Depends(get_settings),
 ) -> AIExtractionResponse:
     """Opt-in, per resume: the candidate's click is the consent to send the text to a provider.
 
@@ -184,8 +204,12 @@ def run_ai_extraction(
     if resume.upload_status != ResumeStatus.PROCESSED or not resume.raw_text:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "Only resumes that were read successfully can use AI extraction.")
-    raw_text = resume.raw_text
-    db.commit()  # end the read transaction: hold no DB connection during the model call
+    raw_text, candidate_id = resume.raw_text, resume.candidate_id
+    try:  # commits: ends the read transaction, so no DB connection is held during the call
+        charge_ai(db, AI_EXTRACTION, candidate_id, settings)
+    except LimitReached as exc:
+        detail = AI_BUDGET_USED if exc.scope == "ai_global" else EXTRACTIONS_USED
+        raise _limit_reached(exc, detail) from None
 
     try:
         # Sync route (sync DB session) calling the async gateway on the event loop.

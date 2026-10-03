@@ -42,6 +42,7 @@ class RulesReason(StrEnum):
     PROVIDERS_FAILED = "PROVIDERS_FAILED"  # every provider failed (timeout, auth, rate limit, ...)
     OUTPUT_REJECTED = "OUTPUT_REJECTED"  # proposals failed validation twice
     CONSENT_WITHDRAWN = "CONSENT_WITHDRAWN"  # consent withdrawn while the model was running
+    QUOTA_REACHED = "QUOTA_REACHED"  # a daily AI usage limit was reached (services/limits.py)
 
 
 class InterviewStatus(StrEnum):
@@ -90,6 +91,7 @@ class InterviewSession(Base):
         # keep NULL rather than a guessed reason.)
         CheckConstraint("finish_reason IS NULL OR status IN ('REPORT_GENERATION', 'COMPLETED')",
                         name="finish_reason_only_when_finished"),
+        CheckConstraint("retry_of_id <> id", name="retry_of_another_session"),
     )
     __mapper_args__ = {"eager_defaults": True}
 
@@ -122,6 +124,11 @@ class InterviewSession(Base):
     active_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finish_reason: Mapped[FinishReason | None] = mapped_column(
         checked_enum(FinishReason, "finish_reason")
+    )
+    # The completed interview this one retries (Phase 10 retry), for the candidate's history.
+    # NULL for a first attempt, or once the source has been deleted.
+    retry_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("interview_sessions.id", ondelete="SET NULL"), index=True
     )
 
 

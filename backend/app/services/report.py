@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from app.models import AnswerEvaluation, InterviewQuestion, InterviewSession
 from app.models.answer_evaluation import Criterion
 from app.models.interview_question import AnswerKind, EvaluationStatus, QuestionSource
-from app.models.interview_session import FinishReason, InterviewStatus, RulesReason
+from app.models.interview_session import FinishReason, InterviewStatus
 from app.schemas.interview_plan import InterviewPlan
 from app.schemas.report import (
     AnswerCounts,
@@ -43,9 +43,9 @@ from app.schemas.report import (
     Unavailable,
 )
 from app.services.evaluator import (
-    PROVIDERS_DOWN,
     RUBRICS,
     evaluation_view,
+    notice_for,
     session_evaluations,
 )
 from app.services.interview_state_machine import SessionEvent, apply_event
@@ -166,7 +166,7 @@ def build_report(session: InterviewSession, plan: InterviewPlan,
         answer_evidence=[AnswerEvidence(
             question_id=q.id, seq=q.seq, topic_position=q.topic_position,
             status=q.evaluation_status, evaluation=evaluation_view(plan, q, row),
-            notice=PROVIDERS_DOWN if row.rules_reason == RulesReason.PROVIDERS_FAILED else None)
+            notice=notice_for(row.rules_reason))
             for q, row in rows],
         communication_observations=CommunicationObservations(
             answers=[AnswerObservation(question_id=q.id, seq=q.seq, word_count=row.word_count,

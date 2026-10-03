@@ -19,6 +19,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.models import Candidate
 from app.schemas.candidate import CandidateResponse, LoginRequest, RegisterRequest
+from app.services.limits import LOGIN, REGISTER, Limit, LimitReached, consume, network_key
 from app.services.auth import (
     AccountLocked,
     InvalidCredentials,
@@ -33,17 +34,39 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 BAD_CREDENTIALS = "Email or password is incorrect."
 LOCKED = "Too many failed attempts. Please try again in 15 minutes."
+THROTTLED = {
+    REGISTER.scope: "Too many accounts were created from your network. Please try again in "
+                    "{minutes} minutes.",
+    LOGIN.scope: "Too many sign-in attempts from your network. Please try again in {minutes} "
+                 "minutes.",
+}
+
+
+def _throttle(db: Session, request: Request, limit: Limit) -> None:
+    """Per network, before any password is hashed or any account is looked up: the answer is the
+    same whether or not the email exists. Committed at once, so a refused login still counts."""
+    try:
+        consume(db, limit, network_key(request.client.host if request.client else None))
+    except LimitReached as exc:
+        db.rollback()
+        minutes = max(1, -(-exc.retry_after // 60))
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            THROTTLED[limit.scope].format(minutes=minutes),
+                            headers={"Retry-After": str(exc.retry_after)}) from None
+    db.commit()
 
 
 @router.post("/register", response_model=CandidateResponse, status_code=status.HTTP_201_CREATED)
 def register(
     body: RegisterRequest,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Candidate:
     """Creates the candidate and signs them in. A duplicate email is a 409 (enumeration through
     registration is accepted until email verification exists)."""
+    _throttle(db, request, REGISTER)
     with candidate_write(db):
         candidate = new_candidate(db, body.email, body.name, body.password)
         token = start_session(db, candidate.id)
@@ -55,10 +78,12 @@ def register(
 @router.post("/login", response_model=CandidateResponse)
 def login(
     body: LoginRequest,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Candidate:
+    _throttle(db, request, LOGIN)
     try:
         candidate = authenticate(db, body.email, body.password)
     except InvalidCredentials:

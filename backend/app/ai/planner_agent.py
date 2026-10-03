@@ -16,6 +16,7 @@ Defence in depth (same pattern as the ProfileAgent):
 import json
 import logging
 import secrets
+import time
 from dataclasses import dataclass, field
 
 from app.ai.gateway import (
@@ -46,6 +47,7 @@ from app.services.interview_planner import (
 
 logger = logging.getLogger(__name__)
 MAX_PROPOSALS = 2
+PLANNING_SECONDS = 60.0  # longest model wait per planning request (both proposals)
 
 SYSTEM_INSTRUCTION = """You plan a practice interview for an interview coaching app. You only \
 propose a plan. You never judge, score, rank, approve or hire the candidate.
@@ -127,13 +129,19 @@ def build_request(
 async def propose_plan(
     gateway: ModelGateway, settings: PlanSettings, facts: list[FactSnapshot]
 ) -> PlannerOutcome:
+    """At most two gateway calls, both within PLANNING_SECONDS: a hanging provider never holds the
+    request longer. Out of time is PROVIDERS_FAILED, and the caller falls back to rules."""
     outcome = PlannerOutcome(None, None)
     tag = f"plan_data_{secrets.token_hex(8)}"
     rejected: frozenset[str] = frozenset()
+    deadline = time.monotonic() + PLANNING_SECONDS
     for _ in range(MAX_PROPOSALS):
+        if time.monotonic() >= deadline:
+            outcome.rules_reason = RulesReason.PROVIDERS_FAILED
+            return outcome
         request = build_request(settings, facts, tag, rejected)
         try:
-            result = await gateway.generate_structured(request, PlanProposal)
+            result = await gateway.generate_structured(request, PlanProposal, deadline=deadline)
         except ModelUnavailableError as exc:
             outcome.records.append(exc.record)
             outcome.rules_reason = RulesReason.PROVIDERS_FAILED

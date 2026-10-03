@@ -17,6 +17,7 @@ from app.ai.planner_agent import PlannerOutcome, propose_plan
 from app.ai.providers import get_model_gateway
 from app.api.deps import current_candidate
 from app.api.routes.candidates import get_candidate
+from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.models import AnswerEvaluation, Candidate, InterviewQuestion, InterviewSession
 from app.models.interview_question import ANSWER_MAX_LENGTH, AnswerKind
@@ -66,15 +67,17 @@ from app.services.interview_planner import (
     save_plan,
 )
 from app.services.evaluator import (
-    PROVIDERS_DOWN,
     EvaluationNotAllowed,
     PendingEvaluation,
+    ProposalOutcome,
     evaluation_view,
+    notice_for,
     prepare_evaluation,
     save_evaluation,
     session_evaluations,
 )
 from app.services.report import NOT_GENERATED, ReportNotAllowed, complete_report, session_report
+from app.services.limits import AI_EVALUATION, AI_PLANNING, AI_WORDING, admit_ai
 from app.services.retry import RetryNotAllowed, create_retry
 from app.services.interviewer import (
     ConsentNotAllowed,
@@ -83,6 +86,7 @@ from app.services.interviewer import (
     QuestionNotFound,
     TurnNotAllowed,
     TurnOutcome,
+    WordingOutcome,
     consent_history,
     elapsed_seconds,
     load_history,
@@ -257,6 +261,7 @@ def plan_interview_session(
     settings: PlanSettings,
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
+    app_settings: Settings = Depends(get_settings),
 ) -> InterviewPlanResult:
     """INTERVIEW_PLANNING -> READY with a validated plan. Never fails because AI failed: the
     deterministic plan (labelled RULES, with the reason) is used instead (PRD §30, §31).
@@ -275,6 +280,8 @@ def plan_interview_session(
         outcome = PlannerOutcome(None, RulesReason.NOT_REQUESTED)
     elif gateway is None:
         outcome = PlannerOutcome(None, RulesReason.NOT_CONFIGURED)
+    elif not admit_ai(db, AI_PLANNING, inputs.candidate_id, app_settings):
+        outcome = PlannerOutcome(None, RulesReason.QUOTA_REACHED)
     else:
         # Sync route (sync DB session) calling the async gateway on the event loop.
         outcome = anyio.from_thread.run(propose_plan, gateway, inputs.settings, inputs.facts)
@@ -387,6 +394,8 @@ def next_question(
     body: NextQuestionRequest,
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
+    candidate: Candidate = Depends(current_candidate),
+    settings: Settings = Depends(get_settings),
 ) -> TurnResult:
     """The question to answer now. Code decides what it is (topic, follow-up, rephrase) or that
     the interview is over; a model may only word a follow-up or rephrase, with consent. While a
@@ -395,9 +404,12 @@ def next_question(
         turn = prepare_turn(db, session_id, model_available=gateway is not None)
         if isinstance(turn, PendingTurn):
             # No DB connection or lock is held from here until save_turn.
-            request = WordingRequest(turn.topic, turn.answer, turn.original_question)
-            outcome = anyio.from_thread.run(propose_wording, gateway, request, turn.codes,
-                                            turn.deadline)
+            if admit_ai(db, AI_WORDING, candidate.id, settings):
+                request = WordingRequest(turn.topic, turn.answer, turn.original_question)
+                outcome = anyio.from_thread.run(propose_wording, gateway, request, turn.codes,
+                                                turn.deadline)
+            else:
+                outcome = WordingOutcome(rules_reason=RulesReason.QUOTA_REACHED)
             turn = save_turn(db, turn, outcome)
     except SessionNotFound:
         db.rollback()
@@ -467,6 +479,8 @@ def evaluate_answer(
     body: EvaluationRequest,
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
+    candidate: Candidate = Depends(current_candidate),
+    settings: Settings = Depends(get_settings),
 ) -> EvaluationResult:
     """Evaluate one stored answer, once the interview has finished. Code decides the rubric and
     whether a model may be asked (the session's AI consent); a stored result is returned again
@@ -476,8 +490,11 @@ def evaluate_answer(
                                     model_available=gateway is not None)
         if isinstance(result, PendingEvaluation):
             # No DB connection or lock is held from here until save_evaluation.
-            outcome = anyio.from_thread.run(propose_evaluation, gateway, result.context,
-                                            result.codes, result.deadline)
+            if admit_ai(db, AI_EVALUATION, candidate.id, settings):
+                outcome = anyio.from_thread.run(propose_evaluation, gateway, result.context,
+                                                result.codes, result.deadline)
+            else:
+                outcome = ProposalOutcome(rules_reason=RulesReason.QUOTA_REACHED)
             result = save_evaluation(db, result, outcome)
     except SessionNotFound:
         db.rollback()
@@ -494,7 +511,7 @@ def evaluate_answer(
         session_id=result.session.id, question_id=result.question.id,
         status=result.question.evaluation_status,
         evaluation=evaluation_view(result.plan, result.question, row),
-        notice=PROVIDERS_DOWN if row and row.rules_reason == RulesReason.PROVIDERS_FAILED else None,
+        notice=notice_for(row.rules_reason) if row else None,
         model_calls=_call_summaries(result.records))
 
 

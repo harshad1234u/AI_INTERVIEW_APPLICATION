@@ -71,6 +71,14 @@ MAX_ATTEMPTS = 2  # the first evaluation, and one re-evaluation of observations 
 NOT_FINISHED = "Answers can be evaluated only after the interview has finished."
 NOT_ANSWERED = "This question has no answer to evaluate."
 PROVIDERS_DOWN = "AI evaluation is temporarily unavailable. Your interview session has been saved."
+QUOTA_USED = ("The daily AI evaluation limit has been reached, so this answer has observations "
+              "only. Your interview session has been saved.")
+NOTICES = {RulesReason.PROVIDERS_FAILED: PROVIDERS_DOWN, RulesReason.QUOTA_REACHED: QUOTA_USED}
+
+
+def notice_for(reason: RulesReason | None) -> str | None:
+    """The message shown with an evaluation that fell back for a reason the candidate should know."""
+    return NOTICES.get(reason) if reason else None
 
 # Feedback rules (plan E6). Matched on the feedback text only, as rule codes, never logged.
 PSYCHOLOGICAL = re.compile(r"\b(?:nervous(?:ness)?|anxious|anxiety|confident|confidence|"
