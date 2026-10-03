@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import AccountBar from "@/components/AccountBar";
 import InterviewFlow from "@/components/interview/InterviewFlow";
 
 export const metadata: Metadata = {
@@ -10,6 +11,7 @@ export const metadata: Metadata = {
 export default function InterviewPage() {
   return (
     <main>
+      <AccountBar />
       <p>
         <Link href="/">← Your profile</Link>
       </p>

@@ -1,73 +1,48 @@
 "use client";
 
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { SignedIn, useAuth } from "@/components/AuthProvider";
+import ResumeSection from "@/components/ResumeSection";
 import {
   ApiError,
   type Candidate,
   type CandidateInput,
-  createCandidate,
   deleteCandidate,
-  getCandidate,
   updateCandidate,
 } from "@/lib/api";
-import Link from "next/link";
-import ResumeSection from "@/components/ResumeSection";
-import { readStoredId, storeId } from "@/lib/candidateStorage";
+import { LOGIN_PATH } from "@/lib/auth";
 
-type Mode = "loading" | "create" | "view" | "edit";
 type FieldErrors = Partial<Record<keyof CandidateInput, string>>;
 
 const NAME_MAX_LENGTH = 200;
-const EMPTY: CandidateInput = { name: "", email: "" };
 
+/** The signed-in candidate's profile: who they are comes from the session, never the browser. */
 export default function CandidateProfile() {
-  const [mode, setMode] = useState<Mode>("loading");
-  const [candidate, setCandidate] = useState<Candidate | null>(null);
-  const [form, setForm] = useState<CandidateInput>(EMPTY);
+  return <SignedIn>{(candidate) => <Profile candidate={candidate} />}</SignedIn>;
+}
+
+function Profile({ candidate }: { candidate: Candidate }) {
+  const { setCandidate } = useAuth();
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState<CandidateInput>({ name: "", email: "" });
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const reset = useCallback((message: string | null = null) => {
-    storeId(null);
+  function signedOut() {
     setCandidate(null);
-    setForm(EMPTY);
-    setFieldErrors({});
-    setError(message);
-    setMode("create");
-  }, []);
-
-  const load = useCallback(
-    async (signal?: AbortSignal) => {
-      const id = readStoredId();
-      if (!id) return reset();
-      setMode("loading");
-      setError(null);
-      try {
-        setCandidate(await getCandidate(id, signal));
-        setMode("view");
-      } catch (err) {
-        if (signal?.aborted) return;
-        if (err instanceof ApiError && (err.status === 404 || err.status === 422)) return reset();
-        setError(err instanceof ApiError ? err.message : "Could not load your profile.");
-      }
-    },
-    [reset],
-  );
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+    router.replace(LOGIN_PATH);
+  }
 
   function showError(err: unknown) {
     if (!(err instanceof ApiError)) {
       setError("Something went wrong. Please try again.");
       return;
     }
-    if (err.status === 404) return reset("This profile no longer exists.");
+    if (err.status === 404) return signedOut(); // the profile no longer exists
     if (err.status === 409) {
       setFieldErrors({ email: err.message });
       setError("Please fix the highlighted fields.");
@@ -77,31 +52,18 @@ export default function CandidateProfile() {
     setError(err.message);
   }
 
-  function cancelEdit() {
-    setFieldErrors({});
-    setError(null);
-    setMode("view");
-  }
-
   async function submit(e: FormEvent) {
     e.preventDefault();
+    const changes: Partial<CandidateInput> = {};
+    if (form.name !== candidate.name) changes.name = form.name;
+    if (form.email !== candidate.email) changes.email = form.email;
+    if (Object.keys(changes).length === 0) return setEditing(false);
     setBusy(true);
     setError(null);
     setFieldErrors({});
     try {
-      let saved: Candidate;
-      if (mode === "edit" && candidate) {
-        const changes: Partial<CandidateInput> = {};
-        if (form.name !== candidate.name) changes.name = form.name;
-        if (form.email !== candidate.email) changes.email = form.email;
-        if (Object.keys(changes).length === 0) return setMode("view");
-        saved = await updateCandidate(candidate.id, changes);
-      } else {
-        saved = await createCandidate(form);
-      }
-      storeId(saved.id);
-      setCandidate(saved);
-      setMode("view");
+      setCandidate(await updateCandidate(candidate.id, changes));
+      setEditing(false);
     } catch (err) {
       showError(err);
     } finally {
@@ -110,31 +72,26 @@ export default function CandidateProfile() {
   }
 
   async function remove() {
-    if (!candidate) return;
     const warning =
-      "Delete your profile? This permanently removes your name, email and uploaded resume data.";
-    if (!window.confirm(warning)) {
-      return;
-    }
+      "Delete your profile? This permanently removes your account, your resume data and your " +
+      "interviews, and logs you out.";
+    if (!window.confirm(warning)) return;
     setBusy(true);
     setError(null);
     try {
-      await deleteCandidate(candidate.id);
-      reset();
+      await deleteCandidate(candidate.id); // the server also ends every session of this account
+      signedOut();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 404) reset();
-      else showError(err);
-    } finally {
+      showError(err);
       setBusy(false);
     }
   }
 
   function startEdit() {
-    if (!candidate) return;
     setForm({ name: candidate.name, email: candidate.email });
     setFieldErrors({});
     setError(null);
-    setMode("edit");
+    setEditing(true);
   }
 
   const errorBox = error && (
@@ -148,18 +105,7 @@ export default function CandidateProfile() {
       <section className="card" aria-labelledby="profile-heading">
         <h2 id="profile-heading">Your profile</h2>
 
-        {mode === "loading" && (
-          <>
-            {errorBox ?? <p>Loading profile…</p>}
-            {error && (
-              <button type="button" onClick={() => load()}>
-                Retry
-              </button>
-            )}
-          </>
-        )}
-
-        {mode === "view" && candidate && (
+        {!editing && (
           <>
             <dl>
               <dt>Name</dt>
@@ -181,14 +127,8 @@ export default function CandidateProfile() {
           </>
         )}
 
-        {(mode === "create" || mode === "edit") && (
+        {editing && (
           <form onSubmit={submit}>
-            {mode === "create" && (
-              <p className="hint">
-                We store your name and email so you can come back to your practice. You can delete
-                them at any time.
-              </p>
-            )}
             {(["name", "email"] as const).map((field) => (
               <div className="field" key={field}>
                 <label htmlFor={field}>{field === "name" ? "Name" : "Email"}</label>
@@ -214,31 +154,25 @@ export default function CandidateProfile() {
             {errorBox}
             <div className="actions">
               <button type="submit" disabled={busy}>
-                {busy ? "Saving…" : mode === "create" ? "Create profile" : "Save changes"}
+                {busy ? "Saving…" : "Save changes"}
               </button>
-              {mode === "edit" && (
-                <button type="button" onClick={cancelEdit} disabled={busy}>
-                  Cancel
-                </button>
-              )}
+              <button type="button" onClick={() => setEditing(false)} disabled={busy}>
+                Cancel
+              </button>
             </div>
           </form>
         )}
       </section>
-      {candidate && (mode === "view" || mode === "edit") && (
-        <>
-          <ResumeSection key={candidate.id} candidateId={candidate.id} />
-          <section className="card" aria-labelledby="interview-heading">
-            <h2 id="interview-heading">Practice interview</h2>
-            <p className="hint">
-              Once you have reviewed your resume facts, start or continue a text interview.
-            </p>
-            <Link className="button-link" href="/interview">
-              Go to your interview
-            </Link>
-          </section>
-        </>
-      )}
+      <ResumeSection key={candidate.id} candidateId={candidate.id} />
+      <section className="card" aria-labelledby="interview-heading">
+        <h2 id="interview-heading">Practice interview</h2>
+        <p className="hint">
+          Once you have reviewed your resume facts, start or continue a text interview.
+        </p>
+        <Link className="button-link" href="/interview">
+          Go to your interview
+        </Link>
+      </section>
     </>
   );
 }

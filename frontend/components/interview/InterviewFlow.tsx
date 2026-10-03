@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type InterviewSession,
@@ -10,7 +9,7 @@ import {
   deleteInterviewSession,
   listInterviewSessions,
 } from "@/lib/api";
-import { readStoredId } from "@/lib/candidateStorage";
+import { SignedIn } from "@/components/AuthProvider";
 import { COPY, errorText, isUnfinished, screenFor } from "@/lib/interview";
 import InterviewFeedback from "@/components/interview/InterviewFeedback";
 import InterviewReport from "@/components/interview/InterviewReport";
@@ -21,7 +20,11 @@ import InterviewTurn from "@/components/interview/InterviewTurn";
 type Active = { id: string; status: InterviewStatus };
 
 export default function InterviewFlow() {
-  const [candidateId, setCandidateId] = useState<string | null | undefined>(undefined);
+  return <SignedIn>{(candidate) => <Flow candidateId={candidate.id} />}</SignedIn>;
+}
+
+/** The signed-in candidate's interviews. candidateId comes from GET /api/auth/me, never storage. */
+function Flow({ candidateId }: { candidateId: string }) {
   const [sessions, setSessions] = useState<InterviewSession[] | null>(null);
   const [active, setActive] = useState<Active | null>(null);
   const [report, setReport] = useState<ReportResult | null>(null);
@@ -32,16 +35,13 @@ export default function InterviewFlow() {
   const screenRef = useRef<HTMLElement>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
-    const id = readStoredId();
-    setCandidateId(id);
-    if (!id) return;
     setError(null);
     try {
-      setSessions(await listInterviewSessions(id, signal));
+      setSessions(await listInterviewSessions(candidateId, signal));
     } catch (err) {
       if (!signal?.aborted) setError(errorText(err));
     }
-  }, []);
+  }, [candidateId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -68,11 +68,10 @@ export default function InterviewFlow() {
   }
 
   async function startNew() {
-    if (!candidateId) return;
     setBusy(true);
     setError(null);
     try {
-      open(await createInterviewSession(candidateId));
+      open(await createInterviewSession());
     } catch (err) {
       setError(errorText(err)); // e.g. 409: an unfinished session exists (the server's message)
       await load();
@@ -109,16 +108,6 @@ export default function InterviewFlow() {
     setDraft("");
     setSessions(null);
     load();
-  }
-
-  if (candidateId === undefined) return <p>Loading…</p>;
-  if (candidateId === null) {
-    return (
-      <section className="card">
-        <p>{COPY.noProfile}</p>
-        <Link className="button-link" href="/">Go to your profile</Link>
-      </section>
-    );
   }
 
   const errorBox = error && <p className="form-error" role="alert">{error}</p>;

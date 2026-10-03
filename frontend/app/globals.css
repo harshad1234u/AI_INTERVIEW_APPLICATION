@@ -427,3 +427,30 @@ ul.plain-list {
   flex-direction: column;
   gap: 0.5rem;
 }
+
+/* ---------- account (Phase 12) ---------- */
+
+.account-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: flex-end;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.account-bar button {
+  font: inherit;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.account-bar button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

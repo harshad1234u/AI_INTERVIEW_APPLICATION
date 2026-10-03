@@ -1,3 +1,5 @@
+import { LOGIN_PATH, shouldRedirectToLogin } from "@/lib/auth";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
 export type Health = {
@@ -13,6 +15,8 @@ export type Candidate = {
 };
 
 export type CandidateInput = { name: string; email: string };
+export type RegisterInput = CandidateInput & { password: string };
+export type LoginInput = { email: string; password: string };
 
 export type ResumeStatus = "PROCESSED" | "FAILED" | "UNSUPPORTED";
 export type FactCategory = "SKILL" | "PROJECT" | "EXPERIENCE" | "EDUCATION" | "CERTIFICATION";
@@ -103,6 +107,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
           ? { "Content-Type": "application/json", ...init.headers }
           : init.headers,
       cache: "no-store",
+      // Sends the HttpOnly session cookie (same-site API). JavaScript never sees the token.
+      credentials: "include",
     });
   } catch (err) {
     if (init.signal?.aborted) throw err;
@@ -110,6 +116,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   if (res.status === 204) return undefined as T;
   const body: unknown = await res.json().catch(() => null);
+  // Signed out or the session expired: start again at the login page (unsent drafts are lost).
+  if (shouldRedirectToLogin(res.status, path, window.location.pathname)) {
+    window.location.assign(LOGIN_PATH);
+  }
   if (!res.ok) throw toApiError(res.status, body);
   return body as T;
 }
@@ -122,11 +132,19 @@ export async function getHealth(signal?: AbortSignal): Promise<Health> {
   return (await res.json()) as Health;
 }
 
-export const createCandidate = (input: CandidateInput) =>
-  request<Candidate>("/api/candidates", { method: "POST", body: JSON.stringify(input) });
+// ---------- authentication (backend Phase 12) ----------
 
-export const getCandidate = (id: string, signal?: AbortSignal) =>
-  request<Candidate>(`/api/candidates/${encodeURIComponent(id)}`, { signal });
+/** Creates the profile and signs in (the server sets the session cookie). */
+export const register = (input: RegisterInput) =>
+  request<Candidate>("/api/auth/register", { method: "POST", body: JSON.stringify(input) });
+
+export const login = (input: LoginInput) =>
+  request<Candidate>("/api/auth/login", { method: "POST", body: JSON.stringify(input) });
+
+export const logout = () => request<void>("/api/auth/logout", { method: "POST" });
+
+/** Who is signed in: the only source of the candidate's identity. 401 when nobody is. */
+export const getMe = (signal?: AbortSignal) => request<Candidate>("/api/auth/me", { signal });
 
 export const updateCandidate = (id: string, changes: Partial<CandidateInput>) =>
   request<Candidate>(`/api/candidates/${encodeURIComponent(id)}`, {
@@ -137,9 +155,9 @@ export const updateCandidate = (id: string, changes: Partial<CandidateInput>) =>
 export const deleteCandidate = (id: string) =>
   request<void>(`/api/candidates/${encodeURIComponent(id)}`, { method: "DELETE" });
 
-export function uploadResume(candidateId: string, file: File) {
+/** For the signed-in candidate: the server takes the identity from the session, not the form. */
+export function uploadResume(file: File) {
   const body = new FormData();
-  body.append("candidate_id", candidateId);
   body.append("file", file);
   return request<Resume>("/api/resumes", { method: "POST", body });
 }
@@ -428,8 +446,9 @@ export const listInterviewSessions = (candidateId: string, signal?: AbortSignal)
     { signal },
   );
 
-export const createInterviewSession = (candidateId: string) =>
-  request<InterviewSession>("/api/interview-sessions", post({ candidate_id: candidateId }));
+/** For the signed-in candidate (the server refuses a candidate_id in the body). */
+export const createInterviewSession = () =>
+  request<InterviewSession>("/api/interview-sessions", post());
 
 export const getInterviewSession = (id: string, signal?: AbortSignal) =>
   request<InterviewSession>(sessionPath(id), { signal });

@@ -78,7 +78,7 @@ export default function ResumeSection({ candidateId }: { candidateId: string }) 
     setUploading(true);
     setError(null);
     try {
-      const resume = await uploadResume(candidateId, file);
+      const resume = await uploadResume(file);
       await loadFacts([resume]);
       setResumes((prev) => [resume, ...(prev ?? [])]);
       setFile(null);

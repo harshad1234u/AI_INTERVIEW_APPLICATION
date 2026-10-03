@@ -175,7 +175,6 @@ export const FINISH_LABEL: Record<FinishReason, string> = {
 
 export const COPY = {
   unexpected: "Something unexpected happened. Please try again.",
-  noProfile: "Create your profile first, then come back to start an interview.",
   consentLabel: "Use AI assistance for this interview",
   consentDisclosure:
     "Off by default. If you turn it on, your approved profile details, the questions and your " +
