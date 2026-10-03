@@ -599,6 +599,9 @@ def test_ai_follow_up_is_validated_stored_and_linked(
     assert tuple(row) == ("trade-offs", stored)
     [request] = p.calls
     assert ANSWER in request.user_content and ANSWER not in request.system_instruction
+    # The model is told which anchors the validator accepts: planned terms found in the answer.
+    data = json.loads(request.user_content.splitlines()[1])
+    assert data["anchor_options"] == ["implementation", "trade-offs"]  # vocabulary order
 
 
 def test_rejected_ai_wording_falls_back_to_the_term_template(

@@ -88,8 +88,20 @@ async def database_unavailable(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
+def configure_logging(level: str) -> None:
+    """Uvicorn configures only its own loggers, so without this the app's INFO lines (model
+    calls, validation failures, transitions: metadata only, PRD §64) would never be written."""
+    app_logger = logging.getLogger("app")
+    if not app_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        app_logger.addHandler(handler)
+    app_logger.setLevel(level)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
+    configure_logging(settings.log_level)
     is_prod = settings.environment == "production"
     app = FastAPI(
         title="AI Interview Coach API",

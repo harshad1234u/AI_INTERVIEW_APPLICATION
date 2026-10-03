@@ -405,7 +405,8 @@ def next_question(
         if isinstance(turn, PendingTurn):
             # No DB connection or lock is held from here until save_turn.
             if admit_ai(db, AI_WORDING, candidate.id, settings):
-                request = WordingRequest(turn.topic, turn.answer, turn.original_question)
+                request = WordingRequest(turn.topic, turn.answer, turn.original_question,
+                                         tuple(turn.anchor_options))
                 outcome = anyio.from_thread.run(propose_wording, gateway, request, turn.codes,
                                                 turn.deadline)
             else:

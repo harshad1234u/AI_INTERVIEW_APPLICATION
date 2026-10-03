@@ -37,7 +37,9 @@ from app.services.interviewer import DUPLICATE_CODES, WordingOutcome
 
 logger = logging.getLogger(__name__)
 MAX_PROPOSALS = 2
-MAX_OUTPUT_TOKENS = 1024
+# Reasoning models count their thinking here: live (2026-10-03) gpt-oss used 633 of 674 tokens
+# reasoning, and Gemini 2.5 Flash was cut off at 1024. Only tokens actually used are billed.
+MAX_OUTPUT_TOKENS = 2048
 
 COMMON = """You write the wording of one question in a practice interview for an interview \
 coaching app. The application has already decided what happens next; you only write the words. \
@@ -60,8 +62,9 @@ FOLLOW_UP = COMMON + """
 
 Task: a follow-up question about the candidate's answer (field "answer").
 Reply with JSON only: {{"question": "...", "anchor": "..."}}.
-- anchor: a phrase copied exactly from the answer that is also one of the topic's facts or \
-expected concepts.
+- anchor: exactly one of the phrases in "anchor_options" (each is in the answer and is one of \
+the topic's facts or expected concepts). If "anchor_options" is empty, use a phrase copied \
+exactly from the answer that is also one of the topic's facts or expected concepts.
 - question: must contain the anchor."""
 
 REPHRASE = COMMON + """
@@ -82,6 +85,7 @@ class WordingRequest:
     topic: PlannedTopic
     answer: str | None = None  # FOLLOW_UP: the last answer
     original_question: str | None = None  # REPHRASE: the chain's original question
+    anchor_options: tuple[str, ...] = ()  # FOLLOW_UP: the anchors the validator will accept
 
     @property
     def schema(self) -> type[BaseModel]:
@@ -104,6 +108,7 @@ def build_request(wording: WordingRequest, tag: str,
     }
     if wording.answer is not None:
         data["answer"] = wording.answer
+        data["anchor_options"] = list(wording.anchor_options)
     else:
         data["original_question"] = wording.original_question
     return ModelRequest(

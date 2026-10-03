@@ -65,7 +65,8 @@ async def test_prompt_layout_keeps_data_out_of_the_instructions() -> None:  # G2
     data_r = json.loads(rephrase.user_content.split("\n")[1])
     assert data_f["answer"] == ANSWER and "original_question" not in data_f  # answer: FOLLOW_UP only
     assert "answer" not in data_r and data_r["original_question"] == TOPICS[1].question_templates[0]
-    assert set(data_f) - {"answer"} == {"topic", "question_templates", "expected_concepts", "facts"}
+    assert set(data_f) - {"answer", "anchor_options"} == {"topic", "question_templates",
+                                                          "expected_concepts", "facts"}
     assert data_f["facts"] == [{"category": "PROJECT", "fact": "TrustLens"}]  # no ids
     for request in (follow, rephrase):
         assert CLARIFICATION not in request.system_instruction + request.user_content

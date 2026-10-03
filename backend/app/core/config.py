@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     # Marks the session cookie Secure (sent over HTTPS only). Turn on whenever the API is
     # served over HTTPS; plain-HTTP local development needs it off.
     auth_cookie_secure: bool = False
+    # The application's own log lines (ids, enum codes, timings; never content), on stderr.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # AI model gateway. Empty AI_PROVIDERS = AI disabled (resume processing still works).
     # Comma-separated, in order: the first is the primary, the rest are fallbacks.

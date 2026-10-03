@@ -76,7 +76,8 @@ Rules:
 - Personalise only with the listed facts. Never invent or assume projects, skills, technologies, \
 experience or achievements they do not state.
 - A topic about a fact lists its ref and uses the fact's exact wording in the topic or questions. \
-Never mention a listed project in a topic that does not cite it.
+EVERY ref in fact_refs must appear with its exact wording in that topic or its questions: cite \
+only the facts you name. Never mention a listed project in a topic that does not cite it.
 - Every project_understanding topic is about exactly one PROJECT fact, cites it and names it in \
 the topic.
 - A topic without fact_refs is a generic question that presumes nothing about the candidate.

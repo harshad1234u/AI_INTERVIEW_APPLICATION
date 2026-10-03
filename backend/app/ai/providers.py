@@ -43,14 +43,45 @@ EXTRA_BODY: dict[str, dict[str, Any]] = {
 }
 
 
+# Gemini refuses schemas with many bounds: "The specified schema produces a constraint that has too
+# many states for serving" (HTTP 400, verified live 2026-10-03 on the planning schema). It is sent
+# the same shape without length, count and pattern bounds. Nothing is loosened in effect: the
+# gateway validates every reply against the full Pydantic schema before anyone sees it.
+RELAXED_SCHEMA_PROVIDERS = {"gemini"}
+BOUND_KEYS = {"maxLength", "minLength", "maxItems", "minItems", "pattern", "maximum", "minimum",
+              "exclusiveMaximum", "exclusiveMinimum", "format"}
+
+
+def relaxed_schema(schema: Any) -> Any:
+    """A copy of a JSON schema without value bounds. Names under "properties" and "$defs" are
+    names, not keywords, so a property called "pattern" is kept."""
+    if isinstance(schema, list):
+        return [relaxed_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for key, value in schema.items():
+        if key in ("properties", "$defs"):
+            out[key] = {name: relaxed_schema(sub) for name, sub in value.items()}
+        elif key not in BOUND_KEYS:
+            out[key] = relaxed_schema(value)
+    return out
+
+
 def _status_kind(status: int, body: bytes) -> ErrorKind:
     # Gemini answers a bad key with 400 "Please pass a valid API key" / "API key not valid".
     if status in (401, 403) or (status == 400 and b"valid api key" in body.lower()):
         return ErrorKind.AUTH
-    if status == 404:  # all three: unknown model, or not available to this account
+    # 404: unknown model, or not available to this account (all three). 410: the model was
+    # retired (NVIDIA, live 2026-10-03). Either way a configuration problem, never retried.
+    if status in (404, 410):
         return ErrorKind.MODEL_UNAVAILABLE
     if status == 429:
         return ErrorKind.RATE_LIMITED
+    # Groq checks the generation against the schema itself and answers 400 json_validate_failed
+    # when it does not match: that is invalid output (worth a retry), not a bad request.
+    if status == 400 and b"json_validate_failed" in body:
+        return ErrorKind.INVALID_OUTPUT
     if status == 408:
         return ErrorKind.TIMEOUT
     if status >= 500:
@@ -97,7 +128,9 @@ class OpenAICompatibleProvider:
             "max_tokens": max_output_tokens,
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {"name": "response", "schema": json_schema},
+                "json_schema": {"name": "response", "schema": (
+                    relaxed_schema(json_schema) if self.name in RELAXED_SCHEMA_PROVIDERS
+                    else json_schema)},
             },
             **EXTRA_BODY.get(self.name, {}),
         }

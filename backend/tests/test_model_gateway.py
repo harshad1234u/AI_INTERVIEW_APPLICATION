@@ -343,10 +343,13 @@ GEMINI_BAD_KEY = [{"error": {"code": 400, "message": "API key not valid. Please 
 @pytest.mark.parametrize(
     ("status", "body", "kind"),
     [(401, None, ErrorKind.AUTH), (403, None, ErrorKind.AUTH), (400, GEMINI_BAD_KEY, ErrorKind.AUTH),
-     (404, None, ErrorKind.MODEL_UNAVAILABLE), (429, None, ErrorKind.RATE_LIMITED),
+     (404, None, ErrorKind.MODEL_UNAVAILABLE), (410, None, ErrorKind.MODEL_UNAVAILABLE),
+     (429, None, ErrorKind.RATE_LIMITED),
      (408, None, ErrorKind.TIMEOUT), (500, None, ErrorKind.SERVER_ERROR),
      (503, None, ErrorKind.SERVER_ERROR), (400, None, ErrorKind.BAD_REQUEST),
-     (422, None, ErrorKind.BAD_REQUEST)],
+     (422, None, ErrorKind.BAD_REQUEST),
+     (400, {"error": {"message": "Failed to generate JSON", "type": "invalid_request_error",
+                      "code": "json_validate_failed"}}, ErrorKind.INVALID_OUTPUT)],
 )
 async def test_adapter_maps_http_status(status: int, body: object, kind: ErrorKind) -> None:
     body = body or {"error": {"message": f"echo of prompt {KEY}"}}
@@ -419,3 +422,36 @@ async def test_end_to_end_http_fallback_without_leaking_secrets(
     assert KEY not in caplog.text
     assert "Extract items" not in caplog.text and "<data>" not in caplog.text  # no prompt
     assert "Python" not in caplog.text  # no model output
+
+
+async def test_gemini_gets_the_schema_without_bounds_and_the_gateway_still_enforces_them() -> None:
+    """Live 2026-10-03: Gemini answered the planning schema with 400 "too many states for
+    serving". It is sent the same shape without bounds; validation is not loosened."""
+    from app.ai.providers import relaxed_schema
+    from app.schemas.interview_plan import PlanProposal
+
+    full = PlanProposal.model_json_schema()
+    sent: dict[str, dict] = {}
+
+    def handler(name):
+        def handle(request: httpx.Request) -> httpx.Response:
+            sent[name] = json.loads(request.content)["response_format"]["json_schema"]["schema"]
+            return httpx.Response(200, json=completion_body(json.dumps({"topics": []})))
+        return handle
+
+    req = ModelRequest(ModelCapability.INTERVIEW_PLANNING, "I", "<d>D</d>", 0.0)
+    for name in ("gemini", "groq", "nvidia"):
+        await adapter(name, handler(name)).complete(req, full, 512)
+    text = json.dumps(sent["gemini"])
+    assert not any(k in text for k in ('"maxLength"', '"minItems"', '"maxItems"', '"pattern"'))
+    assert sent["gemini"]["$defs"]["TopicProposal"]["required"] == \
+        full["$defs"]["TopicProposal"]["required"]  # the shape itself is unchanged
+    assert sent["groq"] == sent["nvidia"] == full
+    assert relaxed_schema({"properties": {"pattern": {"type": "string", "pattern": "x"}}}) == \
+        {"properties": {"pattern": {"type": "string"}}}  # a property named like a keyword stays
+    # {"topics": []} breaks the dropped minItems=1: the gateway refuses it all the same.
+    gateway = ModelGateway({ModelCapability.INTERVIEW_PLANNING: [adapter("gemini", handler("g2"))]},
+                           timeout_seconds=5, max_retries=0, max_output_tokens=512)
+    with pytest.raises(ModelUnavailableError) as exc:
+        await gateway.generate_structured(req, PlanProposal)
+    assert exc.value.record.error_type == ErrorKind.INVALID_OUTPUT

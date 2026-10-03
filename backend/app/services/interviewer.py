@@ -309,15 +309,18 @@ def used_terms(history: Iterable[InterviewQuestion]) -> set[str]:
     return {normalize(t) for t in terms if t}
 
 
-def deterministic_term(ctx: TurnContext) -> str | None:
-    """§8.1: the first vocabulary entry found in the last answer whose span, as typed, is safe and
-    not used before in the session."""
+def anchor_terms(ctx: TurnContext) -> list[str]:
+    """Every vocabulary entry found in the last answer whose span, as typed, is safe and not used
+    before in the session: the only anchors a follow-up may use."""
     answer, used = ctx.last.answer_text or "", used_terms(ctx.history)
-    for entry in vocabulary(ctx):
-        span = find_phrase(answer, entry)
-        if span and safe_term(span) and normalize(span) not in used:
-            return span
-    return None
+    spans = (find_phrase(answer, entry) for entry in vocabulary(ctx))
+    return list(dict.fromkeys(s for s in spans if s and safe_term(s) and normalize(s) not in used))
+
+
+def deterministic_term(ctx: TurnContext) -> str | None:
+    """§8.1: the first of anchor_terms, in vocabulary order."""
+    terms = anchor_terms(ctx)
+    return terms[0] if terms else None
 
 
 def resolve(ctx: TurnContext, intent: Intent, wording: BaseModel | None = None, *,
@@ -571,6 +574,11 @@ class PendingTurn:
     @property
     def original_question(self) -> str | None:
         return self.ctx.original.text if self.intent.action == Action.REPHRASE else None
+
+    @property
+    def anchor_options(self) -> list[str]:
+        """Told to the model so it need not guess; the validator still checks the anchor."""
+        return anchor_terms(self.ctx) if self.intent.action == Action.FOLLOW_UP else []
 
     def codes(self, wording: BaseModel) -> set[str]:
         return wording_codes(self.ctx, wording)
