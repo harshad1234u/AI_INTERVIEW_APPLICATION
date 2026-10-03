@@ -123,6 +123,12 @@ e2e/
   fixtures/                    A real Edge-printed resume PDF
 ```
 
+## Demo
+
+`demo/README.md` is the runbook for a local or staging demonstration: a synthetic resume, a
+development-only account seed (`demo/seed_demo.py`), the click-by-click script, what to do when a
+provider or the camera fails, and an optional live rehearsal (`e2e/demo_rehearsal.mjs`).
+
 ## Prerequisites
 
 - Python 3.11+
@@ -538,12 +544,13 @@ Output schemas use `extra="forbid"`, so an unexpected field such as `"approved":
 |---|---|---|---|
 | No answer within `AI_TIMEOUT_SECONDS` | `TIMEOUT` | retried | next provider |
 | Network failure | `CONNECTION` | retried | next provider |
-| HTTP 429 | `RATE_LIMITED` | retried | next provider |
+| HTTP 429 | `RATE_LIMITED` | retried, after the provider's `Retry-After` when it is ≤ 10 s and before the call's deadline; a longer one (a daily quota) skips straight to the next provider | next provider |
 | HTTP 5xx, 408 | `SERVER_ERROR` / `TIMEOUT` | retried | next provider |
 | Empty / not JSON / fails schema | `INVALID_OUTPUT` | retried | next provider |
 | Truncated (`finish_reason: length`) | `INVALID_OUTPUT` | **not** retried (same limit, same result) | next provider |
 | HTTP 401 / 403, Gemini's 400 "valid API key" | `AUTH` (log says which `*_API_KEY` to check) | **not** retried | next provider |
-| HTTP 404 (unknown model / no access) | `MODEL_UNAVAILABLE` | **not** retried | next provider |
+| HTTP 404 (unknown model / no access), 410 (model retired) | `MODEL_UNAVAILABLE` | **not** retried | next provider |
+| Groq's 400 `json_validate_failed` | `INVALID_OUTPUT` | retried | next provider |
 | Other HTTP 400 / 422 (e.g. unsupported param) | `BAD_REQUEST` | **not** retried | next provider |
 | Adapter bug | `UNEXPECTED` | **not** retried | next provider |
 

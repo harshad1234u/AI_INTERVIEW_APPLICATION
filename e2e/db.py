@@ -2,6 +2,7 @@
 
     python e2e/db.py deadline <session_id> <seconds_left>   # negative: the deadline has passed
     python e2e/db.py cleanup <email-prefix>        # delete E2E candidates, fake calls, counters
+    python e2e/db.py expire-sessions <email>       # every sign-in of that account ends (expiry)
 """
 
 import sys
@@ -24,6 +25,10 @@ with SessionLocal() as db:
             "(plan->'settings'->>'duration_minutes')::int * 60 - :left - "
             "coalesce(extract(epoch FROM clock_timestamp() - active_since), 0) WHERE id = :s"),
             {"s": arg, "left": seconds_left})
+    elif command == "expire-sessions":
+        db.execute(text("UPDATE auth_sessions SET created_at = now() - interval '8 days', "
+                        "expires_at = now() - interval '1 day' WHERE candidate_id = "
+                        "(SELECT id FROM candidates WHERE email = :e)"), {"e": arg})
     elif command == "cleanup":
         n = db.execute(text("DELETE FROM candidates WHERE email LIKE :p"), {"p": f"{arg}%"}).rowcount
         db.execute(text("DELETE FROM provider_calls WHERE requested_provider = 'e2e'"))

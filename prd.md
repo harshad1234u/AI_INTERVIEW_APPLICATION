@@ -2453,3 +2453,26 @@ The system should follow this rule throughout implementation:
 **AI should reason, but the application should remain in control.**
 
 That is the fundamental difference between this project and a simple LLM chatbot.
+
+---
+
+# Amendment A1 (2026-10-04): optional on-device facial-expression observation
+
+This amendment records a deliberate deviation from §49 (Camera Policy), §54 and §66, whose text
+above is left unchanged.
+
+Optional on-device facial-expression observation was added as an explicit product enhancement at
+the product owner's request. It does not influence scoring, hiring decisions, ranking, or retry
+eligibility.
+
+Constraints it was built under:
+- off by default; the candidate turns it on and off; the interview works the same without it;
+- analysis runs in the candidate's browser; images and video never leave the device and are never
+  stored or logged; only per-question counts of detected expression classes are saved;
+- the report shows them as cautious observations of visible expressions ("Mostly neutral
+  expression"), with a disclaimer that they are not measurements of emotion, personality,
+  confidence, honesty or suitability;
+- nothing that plans, asks, evaluates, reports criteria, selects topics to practise or decides a
+  retry reads them.
+
+Implementation and limits: README, "Optional camera: observed expression signals".
