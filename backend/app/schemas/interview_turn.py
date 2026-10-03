@@ -3,17 +3,19 @@ shapes a model may return for question wording."""
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     SerializerFunctionWrapHandler,
     StrictBool,
     StringConstraints,
     model_serializer,
 )
 
+from app.models.expression import EXPRESSIONS, MAX_SAMPLES, ExpressionStatus
 from app.models.interview_question import (
     QUESTION_MAX_LENGTH,
     AnswerKind,
@@ -31,7 +33,21 @@ from app.schemas.interview_plan import (
     TopicBasis,
 )
 
+ExpressionName = Literal[EXPRESSIONS]  # type: ignore[valid-type]
+
 # ---------- consent ----------
+
+
+class ExpressionObservationRequest(BaseModel):
+    """Counts from the candidate's own browser for one answered question: how many samples the
+    expression model put in each class. No image or video is ever accepted."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: ExpressionStatus
+    counts: dict[ExpressionName, Annotated[int, Field(ge=0, le=MAX_SAMPLES)]] = {}
+    no_face: int = Field(default=0, ge=0, le=MAX_SAMPLES)
+    multiple_faces: int = Field(default=0, ge=0, le=MAX_SAMPLES)
 
 
 class ConsentRequest(BaseModel):

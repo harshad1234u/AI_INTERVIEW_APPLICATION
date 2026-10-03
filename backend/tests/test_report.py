@@ -153,7 +153,7 @@ def test_the_report_completes_the_session(
     assert set(reported["report"]) == {
         "summary", "questions", "coverage", "shown_clearly", "to_practise", "answer_evidence",
         "communication_observations", "topics_to_practise", "recommended_practice", "retry",
-        "score_scale", "limitations"}
+        "score_scale", "limitations", "expression_signals"}
 
 
 def test_summary(reported: dict, db_session: Session, started: str) -> None:

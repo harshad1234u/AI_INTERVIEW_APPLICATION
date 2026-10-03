@@ -50,6 +50,7 @@ from app.schemas.interview_turn import (
     ConsentRequest,
     ConsentState,
     Evaluation,
+    ExpressionObservationRequest,
     NextQuestionRequest,
     Progress,
     QuestionHistory,
@@ -77,6 +78,7 @@ from app.services.evaluator import (
     session_evaluations,
 )
 from app.services.report import NOT_GENERATED, ReportNotAllowed, complete_report, session_report
+from app.services.expressions import ObservationNotAllowed, save_observation
 from app.services.limits import AI_EVALUATION, AI_PLANNING, AI_WORDING, admit_ai
 from app.services.retry import RetryNotAllowed, create_retry
 from app.services.interviewer import (
@@ -529,6 +531,35 @@ def read_evaluations(
         AnswerEvaluationItem(question_id=q.id, seq=q.seq, status=q.evaluation_status,
                              evaluation=evaluation_view(plan, q, evaluations.get(q.id)))
         for q in load_history(db, session.id) if q.answered_at is not None])
+
+
+# ---------- observed expression signals (optional camera, counts only) ----------
+
+
+@router.put("/interview-sessions/{session_id}/questions/{question_id}/expressions",
+            status_code=status.HTTP_204_NO_CONTENT)
+def put_expression_observation(
+    session_id: OwnedSessionId,
+    question_id: uuid.UUID,
+    body: ExpressionObservationRequest,
+    db: Session = Depends(get_db),
+) -> None:
+    """Counts from the candidate's browser for one answered question (replaces earlier ones).
+    No image or video is ever sent or stored; nothing here changes the interview or a score."""
+    try:
+        save_observation(db, session_id, question_id, body.status,
+                         {**body.counts, "no_face": body.no_face,
+                          "multiple_faces": body.multiple_faces})
+    except SessionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND) from None
+    except QuestionNotFound:
+        db.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Question not found") from None
+    except ObservationNotAllowed as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from None
+    _commit(db)
 
 
 # ---------- report (Phase 9) ----------

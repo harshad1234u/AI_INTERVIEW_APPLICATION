@@ -48,6 +48,8 @@ from app.services.evaluator import (
     notice_for,
     session_evaluations,
 )
+from app.services.expressions import session_observations
+from app.services.expressions import signals as expression_signals
 from app.services.interview_state_machine import SessionEvent, apply_event
 from app.services.interviewer import load_history, lock_session, stored_plan
 
@@ -226,8 +228,12 @@ def _unique(items: Iterable) -> list:
 
 
 def session_report(db: Session, session: InterviewSession) -> InterviewReport:
-    return build_report(session, stored_plan(session), load_history(db, session.id),
-                        session_evaluations(db, session.id))
+    history = load_history(db, session.id)
+    report = build_report(session, stored_plan(session), history,
+                          session_evaluations(db, session.id))
+    # Built apart from every other section: nothing above reads expression observations.
+    report.expression_signals = expression_signals(history, session_observations(db, session.id))
+    return report
 
 
 def complete_report(db: Session, session_id: uuid.UUID) -> tuple[InterviewSession, InterviewReport]:

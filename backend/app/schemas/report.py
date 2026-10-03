@@ -8,7 +8,7 @@ names the question it comes from.
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.answer_evaluation import Criterion
 from app.models.interview_question import AnswerKind, EvaluationStatus, QuestionKind
@@ -155,6 +155,26 @@ class PracticeItem(BaseModel):
     question_ids: list[uuid.UUID]  # the answers it comes from, in interview order
 
 
+class ExpressionSignal(BaseModel):
+    question_id: uuid.UUID
+    seq: int
+    summary: str  # cautious words, never a percentage or a claim about feelings
+
+
+class ExpressionSignals(BaseModel):
+    """Optional, experimental camera observations (see services/expressions.py). Never part of
+    any score, feedback, topic to practise or retry decision."""
+
+    available: bool
+    note: str
+    questions: list[ExpressionSignal]
+
+
+def _camera_not_enabled() -> ExpressionSignals:
+    return ExpressionSignals(available=False, questions=[],
+                             note="Not available: the camera was not enabled for this interview.")
+
+
 class InterviewReport(BaseModel):
     summary: ReportSummary
     questions: list[ReportQuestion]
@@ -168,6 +188,7 @@ class InterviewReport(BaseModel):
     retry: RetryAvailability
     score_scale: dict[str, str]  # the evaluator's 1-5 anchors, and "null"
     limitations: str
+    expression_signals: ExpressionSignals = Field(default_factory=_camera_not_enabled)
 
 
 class ReportResult(BaseModel):

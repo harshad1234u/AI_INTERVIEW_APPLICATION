@@ -550,6 +550,7 @@ def intruder_requests(w: dict, mine: dict) -> list[tuple[str, str, dict | None]]
         ("POST", f"{s}/{done}/retry", {}),
         ("POST", f"{s}/{done}/questions/{w['question']}/evaluation", {}),
         ("POST", f"{s}/{mine['done']}/questions/{w['question']}/evaluation", {}),
+        ("PUT", f"{s}/{live}/questions/{w['question']}/expressions", {"status": "UNAVAILABLE"}),
         ("PUT", f"{s}/{live}/ai-consent", {"granted": True}),
         ("POST", f"{s}/{live}/actions", {"action": "CONFIRM_PROFILE"}),
         ("POST", f"{s}/{live}/plan", SETTINGS),
@@ -594,7 +595,7 @@ def test_cross_candidate_requests_are_404_and_change_nothing(
                                             "Fact not found", "Interview session not found",
                                             "Question not found"}, (method, url)
             count += 1
-    assert count == 68
+    assert count == 70
     assert snapshot(db_session) == before
 
 

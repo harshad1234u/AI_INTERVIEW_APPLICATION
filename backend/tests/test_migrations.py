@@ -283,7 +283,7 @@ def test_deleting_candidate_cascades_in_the_database(db_session: Session) -> Non
 
 PLAN_REVISION, BEFORE_PLAN_REVISION = "b8d14f2a9c63", "e5813b741341"
 HEAD = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
-LATEST_REVISION = "b4c8e2d9f013"  # the newest revision: every round trip must end here
+LATEST_REVISION = "c5d1a7e3b920"  # the newest revision: every round trip must end here
 CALL_COLUMNS = ("INSERT INTO provider_calls (request_id, capability, requested_provider, "
                 "succeeded, attempts, fallback_used, latency_ms) ")
 
@@ -1281,6 +1281,38 @@ def test_retry_link_revision_downgrades_and_re_upgrades_cleanly() -> None:
                                      inspect(engine).get_columns("interview_sessions")}
         command.upgrade(cfg, "head")
         command.check(cfg)
-        assert _current_heads() == {HEAD} == {LATEST_REVISION} == {RETRY_LINK_REVISION}
+        assert _current_heads() == {HEAD} == {LATEST_REVISION}
+    finally:
+        command.upgrade(cfg, "head")
+
+
+# ---------- expression observations (optional camera) ----------
+
+
+def test_expression_observations_schema_and_rules(db_session: Session) -> None:
+    insp = inspect(engine)
+    assert {c["name"] for c in insp.get_columns("question_expression_observations")} == {
+        "question_id", "status", "neutral", "happy", "sad", "angry", "fearful", "disgusted",
+        "surprised", "no_face", "multiple_faces", "updated_at"}  # counts only: no image, no time series
+    [fk] = insp.get_foreign_keys("question_expression_observations")
+    assert (fk["referred_table"], fk["options"].get("ondelete")) == ("interview_questions", "CASCADE")
+    question = _answered_question(db_session)
+    columns = "question_id, status, neutral, happy, sad, angry, fearful, disgusted, surprised, "               "no_face, multiple_faces"
+    with pytest.raises(IntegrityError, match="unavailable_has_no_counts"), db_session.begin_nested():
+        db_session.execute(text(f"INSERT INTO question_expression_observations ({columns}) "
+                                "VALUES (:q, 'UNAVAILABLE', 1, 0, 0, 0, 0, 0, 0, 0, 0)"), {"q": question})
+    with pytest.raises(IntegrityError, match="happy_range"), db_session.begin_nested():
+        db_session.execute(text(f"INSERT INTO question_expression_observations ({columns}) "
+                                "VALUES (:q, 'ANALYZED', 0, -1, 0, 0, 0, 0, 0, 0, 0)"), {"q": question})
+
+
+def test_expression_revision_downgrades_and_re_upgrades_cleanly() -> None:
+    cfg = Config(str(ALEMBIC_INI))
+    try:
+        command.downgrade(cfg, RETRY_LINK_REVISION)
+        assert "question_expression_observations" not in inspect(engine).get_table_names()
+        command.upgrade(cfg, "head")
+        command.check(cfg)
+        assert _current_heads() == {HEAD} == {LATEST_REVISION}
     finally:
         command.upgrade(cfg, "head")
