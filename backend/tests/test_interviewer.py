@@ -9,15 +9,16 @@ from sqlalchemy.orm import Session
 
 from app.models.interview_session import FinishReason
 from app.services.interview_state_machine import InvalidTransition, SessionEvent as E, apply_event
-from tests.test_interview_sessions import PLAN, new_candidate
+from tests.auth_helpers import make_candidate
+from tests.test_interview_sessions import PLAN
 
 # ---------- state machine: clock and finish reasons (S1, T1, F1, F2) ----------
 
 
 @pytest.fixture
 def ready(client: TestClient, db_session: Session) -> uuid.UUID:
-    cid = new_candidate(client)
-    sid = client.post("/api/interview-sessions", json={"candidate_id": cid}).json()["id"]
+    make_candidate(client, db_session)
+    sid = client.post("/api/interview-sessions", json={}).json()["id"]
     client.post(f"/api/interview-sessions/{sid}/actions", json={"action": "CONFIRM_PROFILE"})
     apply_event(db_session, uuid.UUID(sid), E.PLAN_READY, plan=PLAN)
     db_session.commit()

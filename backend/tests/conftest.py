@@ -32,10 +32,9 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from app.db.session import engine, get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from tests.auth_helpers import api_client  # noqa: E402
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
-
-
 @pytest.fixture(scope="session", autouse=True)
 def migrated_database() -> None:
     command.upgrade(Config(str(ALEMBIC_INI)), "head")
@@ -66,7 +65,7 @@ def client(db_session: Session) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_db] = _get_db
     try:
-        yield TestClient(app)
+        yield api_client()
     finally:
         app.dependency_overrides.pop(get_db, None)
 
@@ -84,7 +83,8 @@ def dead_database_client() -> Iterator[TestClient]:
 
     app.dependency_overrides[get_db] = _get_db
     try:
-        yield TestClient(app)
+        # Any session cookie: authentication itself needs the database, so it must fail as 503.
+        yield api_client("any-token")
     finally:
         app.dependency_overrides.pop(get_db, None)
         dead.dispose()

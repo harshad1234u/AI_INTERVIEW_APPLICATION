@@ -20,6 +20,7 @@ from app.db.session import SessionLocal
 from app.main import app, create_app
 from app.services.evaluator import NOT_ANSWERED, NOT_FINISHED, PROVIDERS_DOWN
 from app.services.interview_state_machine import SessionEvent as E, apply_event
+from tests.auth_helpers import owner_client
 from tests.fakes import FakeProvider, make_gateway
 from tests.test_interview_plan_api import (  # noqa: F401  (fixtures)
     EMAIL,
@@ -376,7 +377,7 @@ def test_unknown_ids_and_bodies(client: TestClient, started: str, finished: dict
     assert client.get(f"/api/interview-sessions/{uuid.uuid4()}/evaluations").status_code == 404
 
 
-def test_a_question_of_another_session_is_not_found(
+def test_another_candidates_session_is_not_found(
     client: TestClient, started: str, finished: dict, db_session: Session
 ) -> None:
     other = db_session.execute(text(
@@ -387,7 +388,8 @@ def test_a_question_of_another_session_is_not_found(
         "SELECT :c, 'REPORT_GENERATION', plan FROM interview_sessions WHERE id = :s RETURNING id"),
         {"c": other, "s": started}).scalar()
     res = evaluate(client, other_session, finished["tech"]["id"])
-    assert (res.status_code, res.json()) == (404, {"detail": "Question not found"})
+    # Phase 12: the session itself is someone else's, so it does not exist for this candidate.
+    assert (res.status_code, res.json()) == (404, {"detail": "Interview session not found"})
 
 
 # ---------- changes during the model call ----------
@@ -484,7 +486,8 @@ def test_logs_and_call_records_hold_no_content(
 
 def test_evaluation_routes_not_served_in_production() -> None:
     prod = TestClient(create_app(Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x",
-                                          environment="production")))
+                                          environment="production")),
+                      headers={"Origin": "http://localhost:3000"})
     s, q = uuid.uuid4(), uuid.uuid4()
     assert prod.post(f"/api/interview-sessions/{s}/questions/{q}/evaluation",
                      json={}).status_code == 404
@@ -512,14 +515,14 @@ def test_the_interviewer_never_reads_evaluations() -> None:  # C-E1: no hidden c
 
 def test_concurrent_requests_store_one_evaluation(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
     ans(client, sid_, q["id"], said=TECH)
     first_question(client, sid_)
     act(client, sid_, "END_INTERVIEW")
     provider = GatedProvider(TECH_EVAL)
     app.dependency_overrides[get_model_gateway] = lambda: make_gateway(provider, timeout=30)
-    threads, results = in_threads(2, lambda: evaluate(TestClient(app), sid_, q["id"]))
+    threads, results = in_threads(2, lambda: evaluate(owner_client(sid_), sid_, q["id"]))
     try:
         for _ in threads:
             assert provider.arrived.acquire(timeout=10)  # both inside the model call

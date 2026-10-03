@@ -48,6 +48,7 @@ from app.services.report import (
     SCORE_MEANING,
     SPEECH_METRICS,
 )
+from tests.auth_helpers import owner_client
 from tests.fakes import FakeProvider, make_gateway
 from tests.test_evaluation_api import (  # noqa: F401  (fixtures)
     BEHAV,
@@ -525,7 +526,7 @@ def test_completed_is_terminal_and_repeats_change_nothing(
 def test_completion_frees_the_candidates_next_session(
     client: TestClient, started: str, finished: dict, candidate: str
 ) -> None:
-    new = {"candidate_id": candidate}
+    new: dict = {}  # the signed-in candidate (Phase 12)
     assert client.post("/api/interview-sessions", json=new).status_code == 409  # L7
     for label in ("tech", "behavioral"):
         evaluate(client, started, finished[label]["id"])
@@ -570,13 +571,11 @@ def test_unknown_session_and_bodies(client: TestClient, started: str, finished: 
 def test_only_the_requested_session_is_read(
     client: TestClient, reported: dict, started: str, db_session: Session
 ) -> None:
-    other = db_session.execute(text(
-        "INSERT INTO candidates (email, name) VALUES ('other@example.com', 'O') RETURNING id"
-    )).scalar()
+    # The same candidate's next session (theirs, so readable since Phase 12), with no answers.
     other_session = db_session.execute(text(
         "INSERT INTO interview_sessions (candidate_id, status, plan, finish_reason) "
-        "SELECT :c, 'REPORT_GENERATION', plan, 'CANDIDATE_ENDED' FROM interview_sessions "
-        "WHERE id = :s RETURNING id"), {"c": other, "s": started}).scalar()
+        "SELECT candidate_id, 'REPORT_GENERATION', plan, 'CANDIDATE_ENDED' "
+        "FROM interview_sessions WHERE id = :s RETURNING id"), {"s": started}).scalar()
     r = post_report(client, other_session).json()["report"]
     assert (r["questions"], r["answer_evidence"], r["shown_clearly"]) == ([], [], [])
     assert started not in json.dumps(r)
@@ -596,14 +595,15 @@ def test_deleting_the_candidate_removes_the_reports_sources(
     client: TestClient, reported: dict, started: str, candidate: str, db_session: Session
 ) -> None:
     assert client.delete(f"/api/candidates/{candidate}").status_code == 204
-    assert get_report(client, started).status_code == 404
+    assert get_report(client, started).status_code == 401  # signed out with them (Phase 12)
     for table in ("interview_sessions", "interview_questions", "answer_evaluations"):
         assert db_session.scalar(text(f"SELECT count(*) FROM {table}")) == 0
 
 
 def test_report_routes_not_served_in_production() -> None:
     prod = TestClient(create_app(Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x",
-                                          environment="production")))
+                                          environment="production")),
+                      headers={"Origin": "http://localhost:3000"})
     s = uuid.uuid4()
     assert prod.post(f"/api/interview-sessions/{s}/report", json={}).status_code == 404
     assert prod.get(f"/api/interview-sessions/{s}/report").status_code == 404
@@ -769,12 +769,12 @@ def test_concurrent_report_requests_complete_once(
     committed_interview: uuid.UUID, caplog: pytest.LogCaptureFixture
 ) -> None:
     sid_ = committed_interview
-    _finish(TestClient(app), sid_)
+    _finish(owner_client(sid_), sid_)
     caplog.set_level(logging.INFO)
     holder = engine.connect()
     tx = holder.begin()
     holder.execute(text("SELECT id FROM interview_sessions WHERE id = :i FOR UPDATE"), {"i": sid_})
-    threads, results = in_threads(2, lambda: post_report(TestClient(app), sid_))
+    threads, results = in_threads(2, lambda: post_report(owner_client(sid_), sid_))
     try:
         _wait_for_lock_waiters(2)  # both requests are inside, waiting on the same row
     finally:
@@ -787,7 +787,7 @@ def test_concurrent_report_requests_complete_once(
     assert results[0].json()["status"] == "COMPLETED"
     assert [r.getMessage() for r in caplog.records if r.name == "app.services.report"] == [
         f"Interview session {sid_}: report ready (1 questions)"]  # one transition
-    assert get_report(TestClient(app), sid_).json() == results[0].json()
+    assert get_report(owner_client(sid_), sid_).json() == results[0].json()
     with SessionLocal() as db:
         assert db.scalar(text("SELECT status FROM interview_sessions WHERE id = :i"),
                          {"i": sid_}) == "COMPLETED"
@@ -795,13 +795,13 @@ def test_concurrent_report_requests_complete_once(
 
 def test_a_report_waits_for_an_evaluation_in_flight(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
     ans(client, sid_, q["id"], said=TECH)
     _finish(client, sid_)
     provider = GatedProvider(TECH_EVAL)
     app.dependency_overrides[get_model_gateway] = lambda: make_gateway(provider, timeout=30)
-    threads, results = in_threads(1, lambda: evaluate(TestClient(app), sid_, q["id"]))
+    threads, results = in_threads(1, lambda: evaluate(owner_client(sid_), sid_, q["id"]))
     try:
         assert provider.arrived.acquire(timeout=10)  # the evaluation is inside the model call
         res = post_report(client, sid_)
@@ -817,12 +817,12 @@ def test_a_report_waits_for_an_evaluation_in_flight(committed_interview: uuid.UU
 
 def test_a_report_for_a_session_deleted_meanwhile(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview
-    client = TestClient(app)
+    client = owner_client(sid_)
     _finish(client, sid_)
     holder = engine.connect()
     tx = holder.begin()
     holder.execute(text("DELETE FROM interview_sessions WHERE id = :i"), {"i": sid_})
-    threads, results = in_threads(1, lambda: post_report(TestClient(app), sid_))
+    threads, results = in_threads(1, lambda: post_report(owner_client(sid_), sid_))
     try:
         _wait_for_lock_waiters(1)  # the request waits on the row being deleted
     finally:

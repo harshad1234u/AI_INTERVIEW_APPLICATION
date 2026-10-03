@@ -39,13 +39,16 @@ def test_downgrade_upgrade_roundtrip_and_models_in_sync() -> None:
 def test_candidates_table_schema() -> None:
     insp = inspect(engine)
     cols = {c["name"]: c for c in insp.get_columns("candidates")}
-    assert set(cols) == {"id", "email", "name", "created_at"}
-    assert not any(c["nullable"] for c in cols.values())
+    # Credentials and the lockout counters arrived in Phase 12.
+    assert set(cols) == {"id", "email", "name", "created_at", "password_hash", "failed_logins",
+                         "locked_until"}
+    assert {n for n, c in cols.items() if c["nullable"]} == {"password_hash", "locked_until"}
     assert insp.get_pk_constraint("candidates")["constrained_columns"] == ["id"]
     uniques = {u["name"]: u["column_names"] for u in insp.get_unique_constraints("candidates")}
     assert uniques == {"uq_candidates_email": ["email"]}
     checks = {c["name"] for c in insp.get_check_constraints("candidates")}
-    assert checks == {"ck_candidates_email_lowercase", "ck_candidates_name_not_blank"}
+    assert checks == {"ck_candidates_email_lowercase", "ck_candidates_name_not_blank",
+                      "ck_candidates_failed_logins_not_negative"}
 
 
 def test_interview_sessions_table_schema() -> None:
@@ -84,6 +87,8 @@ def test_interview_sessions_migration_downgrades_alone() -> None:
     try:
         insp = inspect(engine)
         assert "interview_sessions" not in insp.get_table_names()
+        # Stepping back through Phase 12 also drops its one candidates CHECK, nothing else.
+        before["candidates"].discard("ck_candidates_failed_logins_not_negative")
         assert {t: {c["name"] for c in insp.get_check_constraints(t)} for t in before} == before
     finally:
         command.upgrade(cfg, "head")
@@ -597,7 +602,7 @@ def test_interviewer_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {EVALUATOR_REVISION}
+    assert _current_heads() == {HEAD} == {AUTH_REVISION}
 
 
 # ---------- NO_ELIGIBLE_TOPIC finish reason (Decision A) ----------
@@ -654,7 +659,7 @@ def test_finish_reason_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {EVALUATOR_REVISION}
+    assert _current_heads() == {HEAD} == {AUTH_REVISION}
 
 
 # ---------- question text limit: 640 (approved 2026-10-02) ----------
@@ -877,4 +882,122 @@ def test_evaluator_revision_downgrades_and_re_upgrades_cleanly() -> None:
     finally:
         command.upgrade(cfg, "head")
     command.check(cfg)
-    assert _current_heads() == {HEAD} == {EVALUATOR_REVISION}
+    assert _current_heads() == {HEAD} == {AUTH_REVISION}
+
+
+# ---------- Phase 12: authentication ----------
+
+AUTH_REVISION = "5c0e1d2f7a91"
+TOKEN = "a" * 64  # stands in for a SHA-256 hex digest
+
+
+def test_auth_schema() -> None:
+    insp = inspect(engine)
+    cols = {c["name"]: c for c in insp.get_columns("auth_sessions")}
+    assert set(cols) == {"token_hash", "candidate_id", "created_at", "expires_at"}
+    assert not any(c["nullable"] for c in cols.values())
+    assert insp.get_pk_constraint("auth_sessions")["constrained_columns"] == ["token_hash"]
+    fks = [(fk["constrained_columns"], fk["referred_table"], fk["options"].get("ondelete"))
+           for fk in insp.get_foreign_keys("auth_sessions")]
+    assert fks == [(["candidate_id"], "candidates", "CASCADE")]
+    assert {i["name"]: i["column_names"] for i in insp.get_indexes("auth_sessions")} == {
+        "ix_auth_sessions_candidate_id": ["candidate_id"]}
+    assert {c["name"] for c in insp.get_check_constraints("auth_sessions")} == {
+        "ck_auth_sessions_expires_after_created"}
+    # No column could hold a raw token or a plaintext password.
+    candidate_cols = {c["name"] for c in insp.get_columns("candidates")}
+    assert not {"token", "password"} & (set(cols) | candidate_cols)
+
+
+def _auth_session(db: Session, candidate_id: str, token: str = TOKEN, ttl: str = "1 day") -> None:
+    db.execute(text("INSERT INTO auth_sessions (token_hash, candidate_id, expires_at) "
+                    "VALUES (:t, :c, now() + CAST(:ttl AS interval))"),
+               {"t": token, "c": candidate_id, "ttl": ttl})
+
+
+def test_new_candidates_default_to_no_password_and_no_lock(db_session: Session) -> None:
+    c = _candidate(db_session)
+    assert tuple(db_session.execute(text(
+        "SELECT password_hash, failed_logins, locked_until FROM candidates WHERE id = :c"),
+        {"c": c}).one()) == (None, 0, None)
+
+
+def test_database_rejects_invalid_auth_rows(db_session: Session) -> None:
+    c = _candidate(db_session)
+    _auth_session(db_session, c)
+    cases = [
+        (lambda: _auth_session(db_session, c), "pk_auth_sessions"),  # one row per token
+        (lambda: _auth_session(db_session, str(uuid.uuid4()), "b" * 64),
+         "fk_auth_sessions_candidate_id_candidates"),
+        (lambda: _auth_session(db_session, c, "c" * 64, "-1 day"),
+         "ck_auth_sessions_expires_after_created"),
+        (lambda: db_session.execute(text("UPDATE candidates SET failed_logins = -1")),
+         "ck_candidates_failed_logins_not_negative"),
+    ]
+    for write, constraint in cases:
+        with pytest.raises(IntegrityError) as exc, db_session.begin_nested():
+            write()
+        assert exc.value.orig.diag.constraint_name == constraint
+
+
+def test_deleting_candidate_deletes_their_auth_sessions(db_session: Session) -> None:
+    keep, gone = _candidate(db_session, "keep@example.com"), _candidate(db_session)
+    _auth_session(db_session, gone)
+    _auth_session(db_session, gone, "b" * 64)
+    _auth_session(db_session, keep, "c" * 64)
+    db_session.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": gone})
+    left = db_session.scalars(text("SELECT candidate_id::text FROM auth_sessions")).all()
+    assert left == [str(keep)]
+
+
+@pytest.fixture
+def committed_password() -> Iterator[None]:
+    with engine.begin() as conn:
+        cid = conn.scalar(text("INSERT INTO candidates (email, name, password_hash) "
+                               "VALUES ('pw@example.com', 'P', 'scrypt$x') RETURNING id"))
+    try:
+        yield
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})
+
+
+def test_auth_downgrade_refuses_while_passwords_exist(committed_password: None) -> None:
+    with pytest.raises(RuntimeError, match="Refusing to downgrade: 1 candidate"):
+        command.downgrade(Config(str(ALEMBIC_INI)), EVALUATOR_REVISION)
+    assert _current_heads() == {HEAD} == {AUTH_REVISION}
+    assert "auth_sessions" in inspect(engine).get_table_names()
+
+
+def test_auth_revision_downgrades_and_re_upgrades_keeping_candidates() -> None:
+    """Upgrade -> downgrade -> upgrade on a database holding a pre-auth candidate."""
+    cfg = Config(str(ALEMBIC_INI))
+    with engine.begin() as conn:
+        cid = conn.scalar(text("INSERT INTO candidates (email, name) "
+                               "VALUES ('kept@example.com', 'Kept') RETURNING id"))
+        conn.execute(text("INSERT INTO auth_sessions (token_hash, candidate_id, expires_at) "
+                          "VALUES (:t, :c, now() + interval '1 day')"), {"t": TOKEN, "c": cid})
+    try:
+        command.downgrade(cfg, EVALUATOR_REVISION)
+        insp = inspect(engine)
+        assert _current_heads() == {EVALUATOR_REVISION}
+        assert "auth_sessions" not in insp.get_table_names()
+        assert {c["name"] for c in insp.get_columns("candidates")} == {
+            "id", "email", "name", "created_at"}
+        command.upgrade(cfg, "head")
+        command.check(cfg)
+        assert _current_heads() == {HEAD} == {AUTH_REVISION}
+        with engine.connect() as conn:
+            # The candidate survived both directions, unchanged; sessions did not (signed out).
+            assert tuple(conn.execute(text(
+                "SELECT email, name, password_hash, failed_logins FROM candidates WHERE id = :c"),
+                {"c": cid}).one()) == ("kept@example.com", "Kept", None, 0)
+            assert conn.scalar(text("SELECT count(*) FROM auth_sessions")) == 0
+            with pytest.raises(IntegrityError) as exc:  # unique email still enforced
+                conn.execute(text("INSERT INTO candidates (email, name) "
+                                  "VALUES ('kept@example.com', 'Dup')"))
+            assert exc.value.orig.diag.constraint_name == "uq_candidates_email"
+    finally:
+        command.upgrade(cfg, "head")
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM candidates WHERE id = :c"), {"c": cid})

@@ -26,6 +26,7 @@ from app.models import Candidate, CandidateFact, InterviewSession, ProviderCall,
 from app.models.interview_session import InterviewStatus as S
 from app.models.resume import FactCategory as FC, FactSource, FactStatus, ResumeStatus
 from app.services.interview_state_machine import SessionEvent as E, apply_event, create_session
+from tests.auth_helpers import make_candidate, owner_client
 from tests.fakes import FakeProvider, make_gateway
 
 NAME, EMAIL = "Asha Rao", "asha.plan@example.com"
@@ -99,9 +100,8 @@ def use_gateway() -> Iterator:
 
 
 @pytest.fixture
-def candidate(client: TestClient) -> str:
-    res = client.post("/api/candidates", json={"email": EMAIL, "name": NAME})
-    return res.json()["id"]
+def candidate(client: TestClient, db_session: Session) -> str:
+    return make_candidate(client, db_session, EMAIL, NAME)
 
 
 @pytest.fixture
@@ -115,7 +115,7 @@ def facts(db_session: Session, candidate: str) -> list:
 @pytest.fixture
 def sid(client: TestClient, candidate: str, facts: list) -> str:
     """A session in INTERVIEW_PLANNING (profile confirmed), with a pending fact arriving after."""
-    session_id = client.post("/api/interview-sessions", json={"candidate_id": candidate}).json()["id"]
+    session_id = client.post("/api/interview-sessions", json={}).json()["id"]
     res = client.post(f"/api/interview-sessions/{session_id}/actions",
                       json={"action": "CONFIRM_PROFILE"})
     assert res.json()["status"] == "INTERVIEW_PLANNING"
@@ -192,8 +192,8 @@ def test_snapshots_never_become_facts_and_go_with_the_candidate(
 def test_mixed_without_an_approved_project_plans_the_other_groups(
     client: TestClient, db_session: Session
 ) -> None:
-    cid = client.post("/api/candidates", json={"email": "np@example.com", "name": "N P"}).json()["id"]
-    sid = client.post("/api/interview-sessions", json={"candidate_id": cid}).json()["id"]
+    cid = make_candidate(client, db_session, "np@example.com", "N P")
+    sid = client.post("/api/interview-sessions", json={}).json()["id"]
     client.post(f"/api/interview-sessions/{sid}/actions", json={"action": "CONFIRM_PROFILE"})
     p = plan(client, sid).json()["plan"]
     assert p["omitted_groups"] == ["PROJECT"]
@@ -262,7 +262,7 @@ def test_invalid_requests_are_422_and_change_nothing(
     assert session_row(db_session, sid)[:2] == ("INTERVIEW_PLANNING", None)
 
 
-def test_unknown_and_malformed_session_ids(client: TestClient) -> None:
+def test_unknown_and_malformed_session_ids(client: TestClient, candidate: str) -> None:
     assert plan(client, uuid.uuid4()).status_code == 404
     assert plan(client, "not-a-uuid").status_code == 422
     assert client.get(f"/api/interview-sessions/{uuid.uuid4()}/plan").status_code == 404
@@ -271,7 +271,7 @@ def test_unknown_and_malformed_session_ids(client: TestClient) -> None:
 def test_planning_before_profile_confirmation_is_409(
     client: TestClient, candidate: str, facts: list
 ) -> None:
-    sid = client.post("/api/interview-sessions", json={"candidate_id": candidate}).json()["id"]
+    sid = client.post("/api/interview-sessions", json={}).json()["id"]
     res = plan(client, sid)
     assert (res.status_code, res.json()["detail"]) == (
         409, "Cannot plan an interview session in PROFILE_REVIEW.")
@@ -310,9 +310,9 @@ def test_later_states_cannot_be_planned(
 def test_project_deep_dive_without_approved_project_asks_first(
     client: TestClient, db_session: Session, use_gateway
 ) -> None:
-    cid = client.post("/api/candidates", json={"email": "pd@example.com", "name": "P D"}).json()["id"]
+    cid = make_candidate(client, db_session, "pd@example.com", "P D")
     add_facts(db_session, cid, (FC.PROJECT, "Unreviewed", FactStatus.REJECTED))
-    sid = client.post("/api/interview-sessions", json={"candidate_id": cid}).json()["id"]
+    sid = client.post("/api/interview-sessions", json={}).json()["id"]
     client.post(f"/api/interview-sessions/{sid}/actions", json={"action": "CONFIRM_PROFILE"})
     provider = FakeProvider("groq", VALID)
     use_gateway(make_gateway(provider))
@@ -425,7 +425,7 @@ def test_database_unavailable_is_503(dead_database_client: TestClient) -> None:
 def test_plan_routes_not_served_in_production() -> None:
     prod = TestClient(create_app(
         Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x", environment="production")
-    ))
+    ), headers={"Origin": "http://localhost:3000"})
     sid = uuid.uuid4()
     assert prod.post(f"/api/interview-sessions/{sid}/plan", json=SETTINGS).status_code == 404
     assert prod.get(f"/api/interview-sessions/{sid}/plan").status_code == 404
@@ -496,12 +496,12 @@ def test_concurrent_plans_persist_exactly_once_without_holding_locks(
     results: list[int] = []
 
     def request() -> None:
-        res = TestClient(app).post(f"/api/interview-sessions/{sid}/plan",
+        res = owner_client(sid).post(f"/api/interview-sessions/{sid}/plan",
                                    json={**SETTINGS, "mode": "PROJECT_DEEP_DIVE"})
         results.append(res.status_code)
 
     threads = [threading.Thread(target=request, daemon=True) for _ in range(2)]
-    consented(TestClient(app), sid)
+    consented(owner_client(sid), sid)
     try:
         for thread in threads:
             thread.start()

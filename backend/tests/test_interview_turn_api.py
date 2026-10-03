@@ -40,6 +40,7 @@ from app.services.interviewer import (
     valid_positions,
 )
 from app.schemas.interview_plan import Competency, PlanSettings, RulesReason
+from tests.auth_helpers import owner_client
 from tests.fakes import FakeProvider, make_gateway
 from tests.test_interview_plan_api import (  # noqa: F401  (fixtures)
     EMAIL,
@@ -208,7 +209,7 @@ def test_not_started_paused_and_unknown(
 
 
 def test_before_the_interview_starts(client: TestClient, candidate: str, facts: list) -> None:
-    session_id = client.post("/api/interview-sessions", json={"candidate_id": candidate}).json()["id"]
+    session_id = client.post("/api/interview-sessions", json={}).json()["id"]
     for _ in range(2):  # PROFILE_REVIEW, then READY
         res = nxt(client, session_id)
         assert (res.status_code, res.json()) == (409, {"detail": "The interview has not started."})
@@ -759,7 +760,8 @@ def test_logs_and_call_records_hold_no_content(
 
 def test_turn_routes_not_served_in_production() -> None:
     prod = TestClient(create_app(Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x",
-                                          environment="production")))
+                                          environment="production")),
+                      headers={"Origin": "http://localhost:3000"})
     sid_ = uuid.uuid4()
     assert prod.post(f"/api/interview-sessions/{sid_}/questions/next", json={}).status_code == 404
     assert prod.post(f"/api/interview-sessions/{sid_}/answers", json={}).status_code == 404
@@ -834,7 +836,7 @@ def _committed(**overrides: object) -> Iterator[tuple[uuid.UUID, list]]:
         apply_event(db, session.id, E.START_INTERVIEW)
         db.commit()
         ids = (cand.id, session.id)
-    consented(TestClient(app), ids[1])
+    consented(owner_client(ids[1]), ids[1])
     try:
         yield ids[1], fact_ids
     finally:
@@ -875,13 +877,13 @@ def assert_nothing_held(session_id: uuid.UUID) -> None:
 
 def test_concurrent_next_requests_persist_one_rephrase(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview  # C1, R12(b)
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
     ans(client, sid_, q["id"], kind="CLARIFY", said="Sorry?")
     provider = GatedProvider({"question": "What is one basic idea in programming that you "
                                           "rely on, and where have you seen it applied?"})
     app.dependency_overrides[get_model_gateway] = lambda: make_gateway(provider, timeout=30)
-    threads, results = in_threads(2, lambda: nxt(TestClient(app), sid_))
+    threads, results = in_threads(2, lambda: nxt(owner_client(sid_), sid_))
     try:
         for _ in threads:
             assert provider.arrived.acquire(timeout=10)  # both inside the model call
@@ -906,12 +908,12 @@ def test_concurrent_next_requests_persist_one_rephrase(committed_interview: uuid
 
 def test_withdrawal_during_an_interviewer_call(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview  # K4, N11(a)
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
     ans(client, sid_, q["id"])
     provider = GatedProvider({"question": "Which trade-offs come up most?", "anchor": "trade-offs"})
     app.dependency_overrides[get_model_gateway] = lambda: make_gateway(provider, timeout=30)
-    threads, results = in_threads(1, lambda: nxt(TestClient(app), sid_))
+    threads, results = in_threads(1, lambda: nxt(owner_client(sid_), sid_))
     try:
         assert provider.arrived.acquire(timeout=10)
         assert_nothing_held(sid_)
@@ -938,14 +940,14 @@ def test_concurrent_late_answers_close_once(
     committed_interview: uuid.UUID, caplog: pytest.LogCaptureFixture
 ) -> None:  # T3, N10
     sid_ = committed_interview
-    client = TestClient(app)
+    client = owner_client(sid_)
     q1 = first_question(client, sid_)
     ans(client, sid_, q1["id"], said="On time.")
     q2 = first_question(client, sid_)
     with SessionLocal() as db:
         run_for(db, sid_, 1000)
     caplog.set_level(logging.INFO)
-    threads, results = in_threads(3, lambda: ans(TestClient(app), sid_, q2["id"], said="Late!"))
+    threads, results = in_threads(3, lambda: ans(owner_client(sid_), sid_, q2["id"], said="Late!"))
     for thread in threads:
         thread.join(30)
     assert [(r.status_code, r.json()) for r in results] == [(409, {"detail": LATE_ANSWER})] * 3
@@ -958,9 +960,9 @@ def test_concurrent_late_answers_close_once(
 
 def test_racing_identical_and_different_answers(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview  # C2
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
-    threads, results = in_threads(3, lambda: ans(TestClient(app), sid_, q["id"], said="Same."))
+    threads, results = in_threads(3, lambda: ans(owner_client(sid_), sid_, q["id"], said="Same."))
     for thread in threads:
         thread.join(30)
     assert [r.status_code for r in results] == [200, 200, 200]  # one store, two replays
@@ -973,12 +975,12 @@ def test_racing_identical_and_different_answers(committed_interview: uuid.UUID) 
 
 def test_an_answer_waits_for_a_pause_and_is_then_refused(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview  # C3
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
     first = SessionLocal()
     try:
         apply_event(first, sid_, E.PAUSE)  # holds the row lock, not committed yet
-        threads, results = in_threads(1, lambda: ans(TestClient(app), sid_, q["id"]))
+        threads, results = in_threads(1, lambda: ans(owner_client(sid_), sid_, q["id"]))
         threads[0].join(0.5)
         assert threads[0].is_alive()  # blocked behind the lock
         first.commit()
@@ -991,11 +993,11 @@ def test_an_answer_waits_for_a_pause_and_is_then_refused(committed_interview: uu
 
 def test_end_and_a_late_answer_race_to_one_finish_reason(committed_interview: uuid.UUID) -> None:
     sid_ = committed_interview  # T8
-    client = TestClient(app)
+    client = owner_client(sid_)
     q = first_question(client, sid_)
     with SessionLocal() as db:
         run_for(db, sid_, 1000)
-    threads, results = in_threads(1, lambda: act(TestClient(app), sid_, "END_INTERVIEW"))
+    threads, results = in_threads(1, lambda: act(owner_client(sid_), sid_, "END_INTERVIEW"))
     late = ans(client, sid_, q["id"])
     threads[0].join(30)
     assert late.status_code == 409 and results[0].status_code == 409
@@ -1010,7 +1012,7 @@ def test_concurrent_requests_end_an_ineligible_interview_once(
     with SessionLocal() as db:
         reject(db, *fact_ids)
     caplog.set_level(logging.INFO)
-    threads, results = in_threads(4, lambda: nxt(TestClient(app), sid_))
+    threads, results = in_threads(4, lambda: nxt(owner_client(sid_), sid_))
     for thread in threads:
         thread.join(30)
     assert [(r.status_code, r.json()["status"], r.json()["finish_reason"], r.json()["question"])
@@ -1031,7 +1033,7 @@ def test_a_withdrawal_racing_the_first_question_is_seen_after_the_lock(
                            {"i": sid_})
         withdrawal.execute(text("UPDATE candidate_facts SET status = 'REJECTED' "
                                 "WHERE id = ANY(:i)"), {"i": fact_ids})
-        threads, results = in_threads(2, lambda: nxt(TestClient(app), sid_))
+        threads, results = in_threads(2, lambda: nxt(owner_client(sid_), sid_))
         for thread in threads:
             thread.join(0.5)
             assert thread.is_alive()  # both wait behind the lock

@@ -20,6 +20,7 @@ from app.models.interview_session import PRE_PLAN_STATUSES, InterviewStatus as S
 from app.models.resume import FactCategory, FactSource, FactStatus, ResumeStatus
 from app.schemas.interview_plan import PlanSettings, RulesReason
 from app.services.interview_planner import fallback_plan
+from tests.auth_helpers import api_client, make_candidate
 from app.services.interview_state_machine import (
     ActiveSessionExists,
     InvalidTransition,
@@ -48,14 +49,15 @@ def plan_for(event: E) -> dict | None:
     return PLAN if event == E.PLAN_READY else None
 
 
-def new_candidate(client: TestClient, email: str = "asha@example.com") -> str:
-    res = client.post("/api/candidates", json={"email": email, "name": "Asha Rao"})
-    assert res.status_code == 201
-    return res.json()["id"]
+def new_candidate(db: Session, email: str = "other@example.com") -> tuple[TestClient, str]:
+    """Another candidate, with their own signed-in client."""
+    other = api_client()
+    return other, make_candidate(other, db, email)
 
 
-def create(client: TestClient, candidate_id: str):
-    return client.post("/api/interview-sessions", json={"candidate_id": candidate_id})
+def create(client: TestClient):
+    """For the client's signed-in candidate: the body names no candidate (Phase 12)."""
+    return client.post("/api/interview-sessions", json={})
 
 
 def act(client: TestClient, session_id: str, action: object):
@@ -92,13 +94,13 @@ def ts(value: str) -> datetime:
 
 
 @pytest.fixture
-def candidate_id(client: TestClient) -> str:
-    return new_candidate(client)
+def candidate_id(client: TestClient, db_session: Session) -> str:
+    return make_candidate(client, db_session)
 
 
 @pytest.fixture
 def session(client: TestClient, candidate_id: str) -> dict:
-    res = create(client, candidate_id)
+    res = create(client)
     assert res.status_code == 201
     return res.json()
 
@@ -109,7 +111,7 @@ def session(client: TestClient, candidate_id: str) -> dict:
 def test_create_starts_in_profile_review_and_is_persisted(
     client: TestClient, candidate_id: str, db_session: Session
 ) -> None:
-    res = create(client, candidate_id)
+    res = create(client)
     assert res.status_code == 201
     body = res.json()
     assert set(body) == {"id", "candidate_id", "status", "created_at", "updated_at"}
@@ -121,23 +123,26 @@ def test_create_starts_in_profile_review_and_is_persisted(
 
 @pytest.mark.parametrize(
     "payload",
-    [{}, {"candidate_id": "not-a-uuid"}, {"candidate_id": None},
-     {"candidate_id": str(uuid.uuid4()), "status": "COMPLETED"},  # clients never set a status
-     {"candidate_id": str(uuid.uuid4()), "id": str(uuid.uuid4())}],
-    ids=["missing", "malformed", "null", "status-field", "id-field"],
+    # A client-supplied candidate_id is refused, never trusted (Phase 12).
+    [{"candidate_id": "not-a-uuid"}, {"candidate_id": None}, {"candidate_id": str(uuid.uuid4())},
+     {"status": "COMPLETED"},  # clients never set a status
+     {"id": str(uuid.uuid4())}],
+    ids=["malformed-candidate", "null-candidate", "client-candidate-id", "status-field",
+         "id-field"],
 )
-def test_create_rejects_invalid_bodies(client: TestClient, payload: dict) -> None:
+def test_create_rejects_invalid_bodies(client: TestClient, candidate_id: str,
+                                       payload: dict) -> None:
     res = client.post("/api/interview-sessions", json=payload)
     assert res.status_code == 422
     assert isinstance(res.json()["detail"], list)  # FastAPI's standard validation format
 
 
-def test_create_for_unknown_candidate_is_404(client: TestClient) -> None:
-    res = create(client, str(uuid.uuid4()))
-    assert (res.status_code, res.json()) == (404, {"detail": "Candidate not found"})
+def test_create_needs_a_signed_in_candidate(client: TestClient) -> None:
+    res = create(client)
+    assert (res.status_code, res.json()) == (401, {"detail": "Please log in."})
 
 
-def test_unknown_or_malformed_session_ids(client: TestClient) -> None:
+def test_unknown_or_malformed_session_ids(client: TestClient, candidate_id: str) -> None:
     missing = str(uuid.uuid4())
     for res in (client.get(f"/api/interview-sessions/{missing}"), act(client, missing, "PAUSE"),
                 client.delete(f"/api/interview-sessions/{missing}")):
@@ -149,8 +154,8 @@ def test_unknown_or_malformed_session_ids(client: TestClient) -> None:
 def test_list_is_scoped_to_the_candidate_and_newest_first(
     client: TestClient, candidate_id: str, session: dict, db_session: Session
 ) -> None:
-    other = new_candidate(client, "other@example.com")
-    other_session = create(client, other).json()
+    other_client, _ = new_candidate(db_session)
+    other_session = create(other_client).json()
     # Finish the first session so a second may be created.
     assert act(client, session["id"], "CONFIRM_PROFILE").status_code == 200
     drive(db_session, session["id"], E.PLAN_READY)
@@ -158,7 +163,7 @@ def test_list_is_scoped_to_the_candidate_and_newest_first(
     drive(db_session, session["id"], E.QUESTION_ASKED)
     act(client, session["id"], "END_INTERVIEW")
     drive(db_session, session["id"], E.REPORT_READY)
-    second = create(client, candidate_id).json()
+    second = create(client).json()
 
     listed = client.get(f"/api/candidates/{candidate_id}/interview-sessions").json()
     assert {s["id"] for s in listed} == {second["id"], session["id"]}
@@ -209,7 +214,7 @@ def test_confirm_is_blocked_while_facts_are_pending_and_never_touches_them(
 def test_another_candidates_pending_facts_do_not_block(
     client: TestClient, session: dict, db_session: Session
 ) -> None:
-    other = new_candidate(client, "other@example.com")
+    _, other = new_candidate(db_session)
     add_fact(db_session, uuid.UUID(other))
     assert act(client, session["id"], "CONFIRM_PROFILE").status_code == 200
 
@@ -287,12 +292,12 @@ def test_retried_action_reports_the_current_state(client: TestClient, session: d
 
 
 def test_second_active_session_is_409_with_the_candidates_own_session_id(
-    client: TestClient, candidate_id: str, session: dict
+    client: TestClient, candidate_id: str, session: dict, db_session: Session
 ) -> None:
-    other = new_candidate(client, "other@example.com")
-    other_session = create(client, other).json()
+    other_client, _ = new_candidate(db_session)
+    other_session = create(other_client).json()
 
-    res = create(client, candidate_id)  # also what a retried create gets
+    res = create(client)  # also what a retried create gets
     assert res.status_code == 409
     assert res.json() == {"detail": "This candidate already has an unfinished interview session: "
                                     f"{session['id']}. Resume it, or delete it to start again."}
@@ -310,7 +315,7 @@ def test_completed_session_does_not_block_a_new_one(
     act(client, session["id"], "START_INTERVIEW")
     drive(db_session, session["id"], E.QUESTION_ASKED, E.ANSWER_SUBMITTED, E.ANSWER_PROCESSED,
           E.ANSWER_EVALUATED, E.FINISH, E.REPORT_READY)
-    res = create(client, candidate_id)
+    res = create(client)
     assert (res.status_code, res.json()["status"]) == (201, "PROFILE_REVIEW")
 
 
@@ -321,7 +326,7 @@ def test_delete_then_restart(client: TestClient, candidate_id: str, session: dic
     assert client.delete(f"/api/interview-sessions/{session['id']}").status_code == 204
     assert client.get(f"/api/interview-sessions/{session['id']}").status_code == 404
     assert client.delete(f"/api/interview-sessions/{session['id']}").status_code == 404
-    restarted = create(client, candidate_id)  # PRD §59: restart = a new attempt
+    restarted = create(client)  # PRD §59: restart = a new attempt
     assert restarted.status_code == 201 and restarted.json()["id"] != session["id"]
 
 
@@ -329,7 +334,8 @@ def test_deleting_the_candidate_deletes_their_sessions(
     client: TestClient, candidate_id: str, session: dict, db_session: Session
 ) -> None:
     assert client.delete(f"/api/candidates/{candidate_id}").status_code == 204
-    assert client.get(f"/api/interview-sessions/{session['id']}").status_code == 404
+    # Their sign-in went too (Phase 12), so the session cannot even be asked for.
+    assert client.get(f"/api/interview-sessions/{session['id']}").status_code == 401
     assert db_session.scalar(text("SELECT count(*) FROM interview_sessions")) == 0
 
 
@@ -348,7 +354,7 @@ def _insert(db: Session, candidate_id: object, status: str) -> None:
 def test_database_enforces_status_candidate_and_one_active_session(
     client: TestClient, db_session: Session
 ) -> None:
-    cid = new_candidate(client)
+    cid = make_candidate(client, db_session)
     for status, constraint in [
         ("TRUSTED", "ck_interview_sessions_status"),
         ("FOLLOW_UP", "ck_interview_sessions_status"),  # a decision, never a stored state
@@ -391,7 +397,7 @@ def test_failed_commit_leaves_state_and_updated_at_unchanged(
 
 def test_database_unavailable_is_503(dead_database_client: TestClient) -> None:
     sid = uuid.uuid4()
-    for res in (create(dead_database_client, str(uuid.uuid4())),
+    for res in (create(dead_database_client),
                 act(dead_database_client, str(sid), "PAUSE"),
                 dead_database_client.get(f"/api/interview-sessions/{sid}")):
         assert res.status_code == 503
@@ -401,7 +407,7 @@ def test_database_unavailable_is_503(dead_database_client: TestClient) -> None:
 def test_session_routes_not_served_in_production() -> None:
     prod = TestClient(create_app(
         Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x", environment="production")
-    ))
+    ), headers={"Origin": "http://localhost:3000"})
     sid = uuid.uuid4()
     assert prod.post("/api/interview-sessions", json={"candidate_id": str(sid)}).status_code == 404
     assert prod.get(f"/api/interview-sessions/{sid}").status_code == 404
@@ -415,7 +421,7 @@ def test_logs_carry_ids_and_states_only(
     client: TestClient, candidate_id: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    sid = create(client, candidate_id).json()["id"]
+    sid = create(client).json()["id"]
     act(client, sid, "CONFIRM_PROFILE")
     assert f"Interview session {sid}: PROFILE_REVIEW -> INTERVIEW_PLANNING" in caplog.text
     assert "Asha" not in caplog.text and "asha@example.com" not in caplog.text

@@ -17,6 +17,7 @@ from app.db.session import SessionLocal, engine
 from app.main import app
 from app.models import InterviewConsentEvent, ProviderCall
 from app.services.interview_state_machine import SessionEvent as E, apply_event
+from tests.auth_helpers import owner_client
 from tests.fakes import FakeProvider, make_gateway
 from tests.test_interview_plan_api import (  # noqa: F401  (fixtures)
     EMAIL,
@@ -98,7 +99,7 @@ def test_history_records_each_change_once_with_its_time(
 def test_consent_can_be_given_before_planning_and_changed_in_any_state(
     client: TestClient, candidate: str, db_session: Session
 ) -> None:
-    session_id = client.post("/api/interview-sessions", json={"candidate_id": candidate}).json()["id"]
+    session_id = client.post("/api/interview-sessions", json={}).json()["id"]
     assert consent(client, session_id, True).status_code == 200  # PROFILE_REVIEW
     for event in (E.CONFIRM_PROFILE, E.PLAN_READY, E.START_INTERVIEW, E.QUESTION_ASKED,
                   E.END_INTERVIEW):
@@ -132,7 +133,7 @@ def test_invalid_consent_bodies_are_422(client: TestClient, sid: str, body: dict
     assert history(client, sid)["history"] == []
 
 
-def test_unknown_session_is_404(client: TestClient) -> None:
+def test_unknown_session_is_404(client: TestClient, candidate: str) -> None:
     missing = uuid.uuid4()
     assert consent(client, missing, True).status_code == 404
     assert client.get(f"/api/interview-sessions/{missing}/ai-consent").status_code == 404
@@ -168,11 +169,11 @@ def test_withdrawal_during_a_planner_call_discards_the_ai_plan(
          "fact_refs": ["F1"], "question_templates": ["Explain the architecture of TrustLens."],
          "expected_concepts": []}]})
     app.dependency_overrides[get_model_gateway] = lambda: make_gateway(provider, timeout=30)
-    consented(TestClient(app), sid)
+    consented(owner_client(sid), sid)
     out: dict = {}
 
     def request() -> None:
-        out["res"] = TestClient(app).post(f"/api/interview-sessions/{sid}/plan",
+        out["res"] = owner_client(sid).post(f"/api/interview-sessions/{sid}/plan",
                                           json={**SETTINGS, "mode": "PROJECT_DEEP_DIVE"})
 
     thread = threading.Thread(target=request, daemon=True)
@@ -183,7 +184,7 @@ def test_withdrawal_during_a_planner_call_discards_the_ai_plan(
         with engine.begin() as conn:  # ...and no row lock
             conn.execute(text("SELECT id FROM interview_sessions WHERE id = :i FOR UPDATE NOWAIT"),
                          {"i": sid})
-        assert consent(TestClient(app), sid, False).status_code == 200
+        assert consent(owner_client(sid), sid, False).status_code == 200
         provider.release.set()
         thread.join(30)
     finally:

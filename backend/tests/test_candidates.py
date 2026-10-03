@@ -7,27 +7,30 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.routes.candidates import _commit
+from app.api.routes.candidates import candidate_write
 from app.core.config import Settings
-from app.main import app, create_app
-from app.models import Candidate
+from app.main import create_app
+from app.models import AuthSession, Candidate
+from tests.auth_helpers import api_client
 
 EMAIL = "harshad@example.com"
+PASSWORD = "correct horse 1"
+REGISTER = "/api/auth/register"
 
 
 def create(client: TestClient, email: str = EMAIL, name: str = "Harshad") -> dict:
-    res = client.post("/api/candidates", json={"email": email, "name": name})
+    """Registers (Phase 12: the only way to create a candidate), which also signs the client in."""
+    res = client.post(REGISTER, json={"email": email, "name": name, "password": PASSWORD})
     assert res.status_code == 201, res.text
     return res.json()
 
 
-# ---------- create ----------
+# ---------- create (registration) ----------
 
 
 def test_create_returns_201_and_normalizes(client: TestClient) -> None:
-    res = client.post(
-        "/api/candidates", json={"email": "  Harshad@Example.COM ", "name": "  Harshad \t  Ambi "}
-    )
+    res = client.post(REGISTER, json={"email": "  Harshad@Example.COM ",
+                                      "name": "  Harshad \t  Ambi ", "password": PASSWORD})
     assert res.status_code == 201
     body = res.json()
     assert body["email"] == EMAIL
@@ -58,7 +61,7 @@ def test_create_returns_201_and_normalizes(client: TestClient) -> None:
     ],
 )
 def test_create_rejects_invalid_input(client: TestClient, payload: dict) -> None:
-    assert client.post("/api/candidates", json=payload).status_code == 422
+    assert client.post(REGISTER, json={**payload, "password": PASSWORD}).status_code == 422
 
 
 def test_create_accepts_max_length_name(client: TestClient) -> None:
@@ -69,14 +72,14 @@ def test_create_accepts_max_length_name(client: TestClient) -> None:
     "extra", [{"id": str(uuid.uuid4())}, {"created_at": "2020-01-01T00:00:00Z"}]
 )
 def test_create_rejects_server_controlled_fields(client: TestClient, extra: dict) -> None:
-    res = client.post("/api/candidates", json={"email": EMAIL, "name": "H", **extra})
+    res = client.post(REGISTER, json={"email": EMAIL, "name": "H", "password": PASSWORD, **extra})
     assert res.status_code == 422
 
 
 @pytest.mark.parametrize("dupe", [EMAIL, "HARSHAD@EXAMPLE.COM"])
 def test_create_duplicate_email_is_409(client: TestClient, dupe: str) -> None:
     create(client)
-    res = client.post("/api/candidates", json={"email": dupe, "name": "Other"})
+    res = client.post(REGISTER, json={"email": dupe, "name": "Other", "password": PASSWORD})
     assert res.status_code == 409
     assert res.json() == {"detail": "A candidate with this email already exists"}
 
@@ -92,17 +95,21 @@ def test_read_existing(client: TestClient) -> None:
 
 
 def test_read_nonexistent_is_404(client: TestClient) -> None:
+    create(client)
     res = client.get(f"/api/candidates/{uuid.uuid4()}")
     assert res.status_code == 404
     assert res.json() == {"detail": "Candidate not found"}
 
 
 def test_read_malformed_id_is_422(client: TestClient) -> None:
+    create(client)
     assert client.get("/api/candidates/not-a-uuid").status_code == 422
 
 
-def test_no_list_endpoint(client: TestClient) -> None:
-    assert client.get("/api/candidates").status_code == 405
+def test_no_list_or_unauthenticated_create_endpoint(client: TestClient) -> None:
+    # POST /api/candidates was replaced by registration: nothing creates a candidate here.
+    assert client.get("/api/candidates").status_code == 404
+    assert client.post("/api/candidates", json={"email": EMAIL, "name": "H"}).status_code == 404
 
 
 # ---------- update ----------
@@ -167,6 +174,7 @@ def test_update_rejects_invalid_patch(client: TestClient, payload: dict) -> None
 
 
 def test_update_nonexistent_is_404(client: TestClient) -> None:
+    create(client)
     res = client.patch(f"/api/candidates/{uuid.uuid4()}", json={"name": "X"})
     assert res.status_code == 404
 
@@ -179,9 +187,12 @@ def test_delete_removes_candidate(client: TestClient, db_session: Session) -> No
     res = client.delete(f"/api/candidates/{c['id']}")
     assert res.status_code == 204
     assert res.content == b""
-    assert client.get(f"/api/candidates/{c['id']}").status_code == 404
     assert db_session.scalar(select(Candidate).where(Candidate.email == EMAIL)) is None
-    assert client.delete(f"/api/candidates/{c['id']}").status_code == 404
+    # Its sessions went with it (ON DELETE CASCADE), and the cookie is cleared: signed out.
+    assert db_session.scalar(select(AuthSession)) is None
+    assert 'coach_session=""' in res.headers["set-cookie"]
+    assert client.get(f"/api/candidates/{c['id']}").status_code == 401
+    assert client.delete(f"/api/candidates/{c['id']}").status_code == 401
 
 
 def test_delete_frees_email_for_reuse(client: TestClient) -> None:
@@ -191,6 +202,7 @@ def test_delete_frees_email_for_reuse(client: TestClient) -> None:
 
 
 def test_delete_nonexistent_is_404(client: TestClient) -> None:
+    create(client)
     assert client.delete(f"/api/candidates/{uuid.uuid4()}").status_code == 404
 
 
@@ -202,7 +214,8 @@ def test_database_unavailable_is_controlled_503(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     for res in (
-        dead_database_client.post("/api/candidates", json={"email": EMAIL, "name": "H"}),
+        dead_database_client.post(REGISTER, json={"email": EMAIL, "name": "H",
+                                                  "password": PASSWORD}),
         dead_database_client.get(f"/api/candidates/{uuid.uuid4()}"),
     ):
         assert res.status_code == 503
@@ -218,8 +231,9 @@ def test_duplicate_does_not_log_personal_data(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     create(client)
-    client.post("/api/candidates", json={"email": EMAIL, "name": "Harshad"})
+    client.post(REGISTER, json={"email": EMAIL, "name": "Harshad", "password": PASSWORD})
     assert EMAIL not in caplog.text
+    assert PASSWORD not in caplog.text
     assert "Harshad" not in caplog.text
 
 
@@ -227,10 +241,9 @@ def test_unexpected_constraint_violation_is_500_without_personal_data(
     db_session: Session, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Bypass schema validation to hit a DB CHECK the API normally prevents.
-    db_session.add(Candidate(email="Upper@Example.com", name="Secret Person"))
     caplog.set_level(logging.DEBUG)
-    with pytest.raises(HTTPException) as exc:
-        _commit(db_session)
+    with pytest.raises(HTTPException) as exc, candidate_write(db_session):
+        db_session.add(Candidate(email="Upper@Example.com", name="Secret Person"))
     assert exc.value.status_code == 500
     assert exc.value.detail == "Could not save candidate"
     assert "ck_candidates_email_lowercase" in caplog.text
@@ -242,8 +255,10 @@ def test_candidate_routes_not_served_in_production() -> None:
     prod = create_app(
         Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x", environment="production")
     )
-    c = TestClient(prod)
-    assert c.post("/api/candidates", json={"email": EMAIL, "name": "H"}).status_code == 404
+    c = TestClient(prod, headers={"Origin": "http://localhost:3000"})
+    assert c.post(REGISTER, json={"email": EMAIL, "name": "H", "password": PASSWORD}
+                  ).status_code == 404
     assert c.get(f"/api/candidates/{uuid.uuid4()}").status_code == 404
-    # Control: the same request is routed outside production.
-    assert TestClient(app).get("/api/candidates/not-a-uuid").status_code == 422
+    assert c.get("/api/auth/me").status_code == 404
+    # Control: the same request is routed outside production (and needs a session there).
+    assert api_client().get("/api/candidates/not-a-uuid").status_code == 401

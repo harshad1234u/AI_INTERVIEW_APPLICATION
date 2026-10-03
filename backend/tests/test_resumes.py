@@ -18,6 +18,7 @@ from app.models import CandidateFact, Resume
 from app.models.resume import FactCategory
 from app.services import resume_extractor
 from app.services.resume_extractor import ExtractedFact
+from tests.auth_helpers import api_client, make_candidate
 
 SETTINGS = get_settings()
 TOO_LARGE = {
@@ -103,28 +104,22 @@ RESUME_PDF = make_pdf(RESUME_PAGE_1, RESUME_PAGE_2)
 
 
 @pytest.fixture
-def candidate_id(client: TestClient) -> str:
-    res = client.post("/api/candidates", json={"email": "harshad@example.com", "name": "Harshad"})
-    assert res.status_code == 201
-    return res.json()["id"]
+def candidate_id(client: TestClient, db_session: Session) -> str:
+    return make_candidate(client, db_session, "harshad@example.com", "Harshad")
 
 
 def upload(
     client: TestClient,
-    candidate_id: str,
     content: bytes = RESUME_PDF,
     filename: str = "resume.pdf",
     content_type: str = "application/pdf",
 ):
-    return client.post(
-        "/api/resumes",
-        data={"candidate_id": candidate_id},
-        files={"file": (filename, content, content_type)},
-    )
+    """For the client's signed-in candidate: the form carries the file only (Phase 12)."""
+    return client.post("/api/resumes", files={"file": (filename, content, content_type)})
 
 
-def uploaded(client: TestClient, candidate_id: str, content: bytes = RESUME_PDF) -> dict:
-    res = upload(client, candidate_id, content)
+def uploaded(client: TestClient, content: bytes = RESUME_PDF) -> dict:
+    res = upload(client, content)
     assert res.status_code == 201, res.text
     return res.json()
 
@@ -153,7 +148,7 @@ def rows(db: Session, model: type, candidate_id: str) -> int:
 
 
 def test_valid_pdf_is_processed(client: TestClient, candidate_id: str, db_session: Session) -> None:
-    body = uploaded(client, candidate_id)
+    body = uploaded(client)
     assert set(body) == {
         "id", "candidate_id", "status", "message", "page_count", "sections", "created_at"
     }
@@ -181,7 +176,7 @@ def test_valid_pdf_is_processed(client: TestClient, candidate_id: str, db_sessio
 
 
 def test_one_page_pdf(client: TestClient, candidate_id: str) -> None:
-    body = uploaded(client, candidate_id, make_pdf(RESUME_PAGE_1))
+    body = uploaded(client, make_pdf(RESUME_PAGE_1))
     assert (body["status"], body["page_count"]) == ("PROCESSED", 1)
     assert [f["fact"] for f in facts(client, body["id"])] == [
         "TrustLens", "FastAPI", "Python", "React"
@@ -191,14 +186,14 @@ def test_one_page_pdf(client: TestClient, candidate_id: str) -> None:
 def test_unusual_formatting_is_normalised(client: TestClient, candidate_id: str) -> None:
     page = "TECHNICAL   SKILLS :\n•   Python ,\tReact\n*  FastAPI\n\nPROJECTS\n" \
         "TrustLens   |   React\n-   detail line."
-    body = uploaded(client, candidate_id, make_pdf(page))
+    body = uploaded(client, make_pdf(page))
     assert [(f["category"], f["fact"]) for f in facts(client, body["id"])] == [
         ("PROJECT", "TrustLens"), ("SKILL", "FastAPI"), ("SKILL", "Python"), ("SKILL", "React")
     ]
 
 
 def test_facts_start_pending_with_provenance(client: TestClient, candidate_id: str) -> None:
-    resume = uploaded(client, candidate_id)
+    resume = uploaded(client)
     got = facts(client, resume["id"])
     assert [(f["category"], f["fact"]) for f in got] == [
         ("CERTIFICATION", "AWS Certified Cloud Practitioner"),
@@ -225,7 +220,7 @@ def test_facts_start_pending_with_provenance(client: TestClient, candidate_id: s
 def test_pdf_without_text_is_unsupported(
     client: TestClient, candidate_id: str, db_session: Session, content: bytes
 ) -> None:
-    body = uploaded(client, candidate_id, content)
+    body = uploaded(client, content)
     assert body["status"] == "UNSUPPORTED"
     assert body["message"] == NO_TEXT_MESSAGE
     assert facts(client, body["id"]) == []
@@ -235,7 +230,7 @@ def test_pdf_without_text_is_unsupported(
 
 
 def test_too_many_pages_is_unsupported(client: TestClient, candidate_id: str) -> None:
-    body = uploaded(client, candidate_id, blank_pdf(resume_extractor.MAX_PAGES + 1))
+    body = uploaded(client, blank_pdf(resume_extractor.MAX_PAGES + 1))
     assert (body["status"], body["page_count"]) == ("UNSUPPORTED", 11)
     assert "maximum 10 pages" in body["message"]
 
@@ -249,7 +244,7 @@ def test_too_many_pages_is_unsupported(client: TestClient, candidate_id: str) ->
 def test_malformed_pdf_fails_safely(
     client: TestClient, candidate_id: str, db_session: Session, content: bytes
 ) -> None:
-    body = uploaded(client, candidate_id, content)
+    body = uploaded(client, content)
     assert (body["status"], body["message"]) == ("FAILED", UNREADABLE_MESSAGE)
     assert facts(client, body["id"]) == []
     resume = db_session.get(Resume, uuid.UUID(body["id"]))
@@ -269,7 +264,7 @@ def test_parser_exception_is_failed_without_leaking(
 
     monkeypatch.setattr(resume_extractor, "PdfReader", explode)
     caplog.set_level(logging.DEBUG)
-    body = uploaded(client, candidate_id)
+    body = uploaded(client)
     assert (body["status"], body["message"]) == ("FAILED", UNREADABLE_MESSAGE)
     assert facts(client, body["id"]) == []
     assert "RuntimeError" in caplog.text
@@ -300,7 +295,7 @@ def test_invalid_upload_is_rejected_and_not_stored(
     client: TestClient, candidate_id: str, db_session: Session,
     filename: str, content: bytes, content_type: str, detail: str,
 ) -> None:
-    res = upload(client, candidate_id, content, filename, content_type)
+    res = upload(client, content, filename, content_type)
     assert res.status_code == (422 if not content else 415)
     assert res.json() == {"detail": detail}
     assert rows(db_session, Resume, candidate_id) == 0
@@ -309,21 +304,21 @@ def test_invalid_upload_is_rejected_and_not_stored(
 def test_uppercase_extension_and_mime_parameters_are_accepted(
     client: TestClient, candidate_id: str
 ) -> None:
-    res = upload(client, candidate_id, filename="CV.PDF", content_type="Application/PDF; x=1")
+    res = upload(client, filename="CV.PDF", content_type="Application/PDF; x=1")
     assert res.status_code == 201
 
 
 def test_file_over_size_limit_is_413(
     client: TestClient, candidate_id: str, db_session: Session
 ) -> None:
-    res = upload(client, candidate_id, b"%PDF-" + b"0" * SETTINGS.max_resume_bytes)
+    res = upload(client, b"%PDF-" + b"0" * SETTINGS.max_resume_bytes)
     assert res.status_code == 413
     assert res.json() == TOO_LARGE
     assert rows(db_session, Resume, candidate_id) == 0
 
 
 def test_file_exactly_at_size_limit_is_accepted(client: TestClient, candidate_id: str) -> None:
-    res = upload(client, candidate_id, b"%PDF-" + b"0" * (SETTINGS.max_resume_bytes - 5))
+    res = upload(client, b"%PDF-" + b"0" * (SETTINGS.max_resume_bytes - 5))
     assert res.status_code == 201
     assert res.json()["status"] == "FAILED"
 
@@ -336,7 +331,7 @@ def test_huge_body_is_rejected_by_the_body_limit(
 
     monkeypatch.setattr(resumes_route, "_read_pdf", must_not_run)
     huge = b"%PDF-" + b"0" * (SETTINGS.max_resume_bytes + MULTIPART_OVERHEAD_BYTES)
-    res = upload(client, candidate_id, huge)
+    res = upload(client, huge)
     assert res.status_code == 413
     assert res.json() == TOO_LARGE
 
@@ -360,16 +355,21 @@ def test_body_limit_stops_reading_once_over_the_limit() -> None:
     assert (exc.value.status_code, exc.value.detail, reads) == (413, "too big", 3)
 
 
-@pytest.mark.parametrize(
-    "candidate", [str(uuid.uuid4()), "not-a-uuid", None], ids=["unknown", "malformed", "missing"]
-)
-def test_upload_requires_an_existing_candidate(client: TestClient, candidate: str | None) -> None:
-    res = client.post(
-        "/api/resumes",
-        data={} if candidate is None else {"candidate_id": candidate},
-        files={"file": ("resume.pdf", RESUME_PDF, "application/pdf")},
-    )
-    assert res.status_code == (404 if candidate and candidate != "not-a-uuid" else 422)
+def test_upload_requires_a_signed_in_candidate(client: TestClient, db_session: Session) -> None:
+    res = upload(client)
+    assert (res.status_code, res.json()) == (401, {"detail": "Please log in."})
+    assert db_session.scalar(select(func.count()).select_from(Resume)) == 0
+
+
+def test_upload_never_trusts_a_client_supplied_candidate_id(
+    client: TestClient, candidate_id: str, db_session: Session
+) -> None:
+    other = make_candidate(api_client(), db_session, "other@example.com", "Other")
+    res = client.post("/api/resumes", data={"candidate_id": other},
+                      files={"file": ("resume.pdf", RESUME_PDF, "application/pdf")})
+    assert res.status_code == 201
+    assert res.json()["candidate_id"] == candidate_id  # the signed-in candidate, always
+    assert rows(db_session, Resume, other) == 0
 
 
 def test_upload_requires_a_file(client: TestClient, candidate_id: str) -> None:
@@ -389,7 +389,7 @@ def test_upload_requires_a_file(client: TestClient, candidate_id: str) -> None:
 def test_malicious_filename_is_never_used_or_stored(
     client: TestClient, candidate_id: str, db_session: Session, filename: str
 ) -> None:
-    res = upload(client, candidate_id, filename=filename)
+    res = upload(client, filename=filename)
     assert res.status_code == 201
     assert res.json()["status"] == "PROCESSED"
     resume = db_session.get(Resume, uuid.UUID(res.json()["id"]))
@@ -404,7 +404,7 @@ def test_prompt_injection_in_resume_stays_inert_data(
 ) -> None:
     """Regression guard for Phase 4: instructions inside a resume are content, nothing more."""
     pdf = make_pdf(f"Summary\n{INJECTION}\nTechnical Skills\nPython\n{INJECTION}")
-    body = uploaded(client, candidate_id, pdf)
+    body = uploaded(client, pdf)
 
     # Stored verbatim as candidate-provided resume text...
     assert body["status"] == "PROCESSED"
@@ -428,8 +428,8 @@ def test_upload_logs_no_resume_content_or_names(
     client: TestClient, candidate_id: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.DEBUG)
-    upload(client, candidate_id, filename="Harshad_Ambi_Resume.pdf")
-    upload(client, candidate_id, b"%PDF-1.4\nHarshad junk", filename="Harshad_Ambi_Resume.pdf")
+    upload(client, filename="Harshad_Ambi_Resume.pdf")
+    upload(client, b"%PDF-1.4\nHarshad junk", filename="Harshad_Ambi_Resume.pdf")
     assert "stored: PROCESSED" in caplog.text  # the log line exists, just without content
     for leak in ("Harshad", "harshad@example.com", "TrustLens", "Python", "Ignore all"):
         assert leak not in caplog.text
@@ -439,7 +439,7 @@ def test_resume_routes_not_served_in_production() -> None:
     prod = create_app(
         Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x", environment="production")
     )
-    c = TestClient(prod)
+    c = TestClient(prod, headers={"Origin": "http://localhost:3000"})
     assert c.get(f"/api/resumes/{uuid.uuid4()}").status_code == 404
     assert c.get(f"/api/candidates/{uuid.uuid4()}/resumes").status_code == 404
     res = c.post("/api/resumes", data={"candidate_id": str(uuid.uuid4())},
@@ -451,7 +451,7 @@ def test_resume_routes_not_served_in_production() -> None:
 
 
 def test_approve_then_reject_persists(client: TestClient, candidate_id: str) -> None:
-    resume = uploaded(client, candidate_id)
+    resume = uploaded(client)
     python = fact_named(client, resume["id"], "Python")
     url = fact_url(resume["id"], python["id"])
 
@@ -467,7 +467,7 @@ def test_approve_then_reject_persists(client: TestClient, candidate_id: str) -> 
 
 
 def test_edit_keeps_extraction_and_provenance(client: TestClient, candidate_id: str) -> None:
-    resume = uploaded(client, candidate_id)
+    resume = uploaded(client)
     react = fact_named(client, resume["id"], "React")
     res = client.patch(
         fact_url(resume["id"], react["id"]), json={"fact": "  React.js  ", "status": "APPROVED"}
@@ -492,14 +492,14 @@ def test_edit_keeps_extraction_and_provenance(client: TestClient, candidate_id: 
          "blank-fact", "long-fact", "source", "extracted_fact", "source_section", "candidate_id"],
 )
 def test_invalid_review_is_rejected(client: TestClient, candidate_id: str, payload: dict) -> None:
-    resume = uploaded(client, candidate_id)
+    resume = uploaded(client)
     react = fact_named(client, resume["id"], "React")
     assert client.patch(fact_url(resume["id"], react["id"]), json=payload).status_code == 422
     assert fact_named(client, resume["id"], "React") == react
 
 
 def test_fact_must_belong_to_the_resume_in_the_url(client: TestClient, candidate_id: str) -> None:
-    first, second = uploaded(client, candidate_id), uploaded(client, candidate_id)
+    first, second = uploaded(client), uploaded(client)
     react = fact_named(client, first["id"], "React")
     body = {"status": "APPROVED"}
     assert client.patch(fact_url(second["id"], react["id"]), json=body).status_code == 404
@@ -515,7 +515,7 @@ def test_fact_must_belong_to_the_resume_in_the_url(client: TestClient, candidate
 def test_reupload_creates_a_new_resume_and_keeps_the_old(
     client: TestClient, candidate_id: str, db_session: Session
 ) -> None:
-    first = uploaded(client, candidate_id)
+    first = uploaded(client)
     python = fact_named(client, first["id"], "Python")
     client.patch(fact_url(first["id"], python["id"]), json={"status": "APPROVED"})
     # Tests share one transaction (so one now()); age the first upload to check ordering.
@@ -524,7 +524,7 @@ def test_reupload_creates_a_new_resume_and_keeps_the_old(
         .values(created_at=func.now() - func.make_interval(0, 0, 0, 0, 0, 1))
     )
 
-    second = uploaded(client, candidate_id)
+    second = uploaded(client)
     assert second["id"] != first["id"]
     listing = client.get(f"/api/candidates/{candidate_id}/resumes")
     assert [r["id"] for r in listing.json()] == [second["id"], first["id"]]
@@ -532,11 +532,11 @@ def test_reupload_creates_a_new_resume_and_keeps_the_old(
     assert fact_named(client, second["id"], "Python")["status"] == "PENDING_REVIEW"
 
 
-def test_list_resumes_for_unknown_candidate_is_404(client: TestClient) -> None:
+def test_list_resumes_for_unknown_candidate_is_404(client: TestClient, candidate_id: str) -> None:
     assert client.get(f"/api/candidates/{uuid.uuid4()}/resumes").status_code == 404
 
 
-def test_unknown_resume_is_404(client: TestClient) -> None:
+def test_unknown_resume_is_404(client: TestClient, candidate_id: str) -> None:
     rid = uuid.uuid4()
     for res in (
         client.get(f"/api/resumes/{rid}"),
@@ -551,7 +551,7 @@ def test_unknown_resume_is_404(client: TestClient) -> None:
 def test_delete_resume_removes_its_facts(
     client: TestClient, candidate_id: str, db_session: Session
 ) -> None:
-    resume = uploaded(client, candidate_id)
+    resume = uploaded(client)
     python = fact_named(client, resume["id"], "Python")
     client.patch(fact_url(resume["id"], python["id"]), json={"status": "APPROVED"})
 
@@ -565,8 +565,8 @@ def test_delete_resume_removes_its_facts(
 def test_deleting_candidate_deletes_resumes_and_facts(
     client: TestClient, candidate_id: str, db_session: Session
 ) -> None:
-    uploaded(client, candidate_id)
-    uploaded(client, candidate_id, blank_pdf())
+    uploaded(client)
+    uploaded(client, blank_pdf())
     assert rows(db_session, Resume, candidate_id) == 2
     assert rows(db_session, CandidateFact, candidate_id) == 6
 
@@ -591,7 +591,7 @@ def test_failed_write_leaves_nothing_behind(
 
     monkeypatch.setattr(resumes_route, "process_pdf", with_unstorable_fact)
     caplog.set_level(logging.DEBUG)
-    res = upload(client, candidate_id)
+    res = upload(client)
     assert res.status_code == 500
     assert res.json() == {"detail": "Could not save resume"}
     # One transaction: no resume row and none of the valid facts survive a failed write.
@@ -603,6 +603,6 @@ def test_failed_write_leaves_nothing_behind(
 
 
 def test_database_unavailable_is_503(dead_database_client: TestClient) -> None:
-    res = upload(dead_database_client, str(uuid.uuid4()))
+    res = upload(dead_database_client)
     assert res.status_code == 503
     assert res.json() == {"detail": "Service temporarily unavailable. Please try again."}

@@ -29,6 +29,7 @@ from app.services.interview_planner import SENSITIVE
 from app.services.interview_state_machine import SessionEvent as E
 from app.services.interviewer import HIRING, MARKUP, URL
 from app.services.retry import FACTS_CHANGED, NOT_COMPLETED, NOTHING_TO_RETRY, retry_plan
+from tests.auth_helpers import owner_client
 from tests.test_evaluation_api import (  # noqa: F401  (fixtures)
     TECH,
     ai,
@@ -276,7 +277,8 @@ def test_pending_profile_facts_are_409(
 
 def test_retry_routes_not_served_in_production() -> None:
     prod = TestClient(create_app(Settings(_env_file=None, database_url="postgresql+psycopg://u:p@h/x",
-                                          environment="production")))
+                                          environment="production")),
+                      headers={"Origin": "http://localhost:3000"})
     assert prod.post(f"/api/interview-sessions/{uuid.uuid4()}/retry", json={}).status_code == 404
 
 
@@ -408,7 +410,7 @@ def test_deleting_the_candidate_removes_the_retry(
 ) -> None:
     new = post_retry(client, started).json()["session_id"]
     assert client.delete(f"/api/candidates/{candidate}").status_code == 204
-    assert client.get(f"/api/interview-sessions/{new}").status_code == 404
+    assert client.get(f"/api/interview-sessions/{new}").status_code == 401  # signed out too
     assert db_session.scalar(text("SELECT count(*) FROM interview_sessions")) == 0
 
 
@@ -503,7 +505,7 @@ def committed_completed(committed_interview: uuid.UUID) -> Iterator[uuid.UUID]:
     with SessionLocal() as db:
         before = set(db.scalars(text("SELECT id FROM provider_calls")))
     try:
-        complete(TestClient(app), committed_interview, _use, {TEAMWORK})
+        complete(owner_client(committed_interview), committed_interview, _use, {TEAMWORK})
         yield committed_interview
     finally:
         with SessionLocal() as db:
@@ -517,7 +519,7 @@ def test_concurrent_retries_create_one_session(committed_completed: uuid.UUID) -
     holder = engine.connect()
     tx = holder.begin()
     holder.execute(text("SELECT id FROM interview_sessions WHERE id = :i FOR UPDATE"), {"i": sid_})
-    threads, results = in_threads(2, lambda: post_retry(TestClient(app), sid_))
+    threads, results = in_threads(2, lambda: post_retry(owner_client(sid_), sid_))
     try:
         _wait_for_lock_waiters(2)  # both requests wait on the source row
     finally:
@@ -541,7 +543,7 @@ def test_a_retry_of_a_source_deleted_meanwhile(committed_completed: uuid.UUID) -
     holder = engine.connect()
     tx = holder.begin()
     holder.execute(text("DELETE FROM interview_sessions WHERE id = :i"), {"i": sid_})
-    threads, results = in_threads(1, lambda: post_retry(TestClient(app), sid_))
+    threads, results = in_threads(1, lambda: post_retry(owner_client(sid_), sid_))
     try:
         _wait_for_lock_waiters(1)  # the request waits on the row being deleted
     finally:
