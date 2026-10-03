@@ -26,7 +26,7 @@ with SessionLocal() as db:
             {"s": arg, "left": seconds_left})
     elif command == "cleanup":
         n = db.execute(text("DELETE FROM candidates WHERE email LIKE :p"), {"p": f"{arg}%"}).rowcount
-        db.execute(text("DELETE FROM provider_calls WHERE model = 'e2e-fake'"))
+        db.execute(text("DELETE FROM provider_calls WHERE requested_provider = 'e2e'"))
         db.execute(text("DELETE FROM usage_counters"))
         print(f"deleted {n} E2E candidate(s)")
     else:

@@ -53,7 +53,7 @@ def extraction(user_content: str) -> dict:
 
 
 class CapabilityFake:
-    name, model = "groq", "e2e-fake"
+    name, model = "e2e", "e2e-fake"  # never a real provider name: cleanup finds every row
 
     async def complete(self, request, json_schema, max_output_tokens):
         capability = request.capability

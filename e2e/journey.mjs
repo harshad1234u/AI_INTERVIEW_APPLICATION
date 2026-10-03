@@ -177,6 +177,8 @@ await send("Runtime.enable");
 await send("Network.enable");
 await send("Page.setDownloadBehavior", { behavior: "allow", downloadPath: DOWNLOADS });
 
+// Start clean: earlier runs (or other local testing) may have used this network's sign-up quota.
+console.log(db("cleanup", PREFIX));
 const priya = new ApiSession(); // Priya's second "browser", for checks only
 const bob = new ApiSession();
 let priyaId, firstSession, retrySession;
@@ -440,7 +442,8 @@ try {
 
   // ---------- security and quality ----------
   await check("another candidate gets 404 for every one of Priya's resources", async () => {
-    await bob.call("/auth/register", { method: "POST", body: B });
+    const registered = await bob.call("/auth/register", { method: "POST", body: B });
+    if (registered.status !== 201) throw new Error(`Bob's registration: ${registered.status}`);
     const probes = await Promise.all([
       bob.call(`/candidates/${priyaId}/interview-sessions`),
       bob.call(`/interview-sessions/${firstSession}/report`),
