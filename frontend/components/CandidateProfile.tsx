@@ -4,6 +4,7 @@ import { type FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { SignedIn, useAuth } from "@/components/AuthProvider";
+import ManualFactsSection from "@/components/ManualFactsSection";
 import ResumeSection from "@/components/ResumeSection";
 import {
   ApiError,
@@ -163,6 +164,7 @@ function Profile({ candidate }: { candidate: Candidate }) {
           </form>
         )}
       </section>
+      <ManualFactsSection key={`manual-${candidate.id}`} candidateId={candidate.id} />
       <ResumeSection key={candidate.id} candidateId={candidate.id} />
       <section className="card" aria-labelledby="interview-heading">
         <h2 id="interview-heading">Practice interview</h2>

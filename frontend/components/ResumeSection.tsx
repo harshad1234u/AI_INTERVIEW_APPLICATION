@@ -4,7 +4,6 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from "react"
 import {
   ApiError,
   type Fact,
-  type FactCategory,
   type FactReview,
   type Resume,
   deleteResume,
@@ -14,14 +13,8 @@ import {
   runAiExtraction,
   uploadResume,
 } from "@/lib/api";
-
-const CATEGORIES: [FactCategory, string][] = [
-  ["SKILL", "Skills"],
-  ["PROJECT", "Projects"],
-  ["EXPERIENCE", "Experience"],
-  ["EDUCATION", "Education"],
-  ["CERTIFICATION", "Certifications"],
-];
+import { FACT_CATEGORIES } from "@/lib/profile";
+import { focusManualEntry } from "@/components/ManualFactsSection";
 const STATUS_LABEL = { PENDING_REVIEW: "Needs review", APPROVED: "Approved", REJECTED: "Rejected" };
 const RESUME_STATUS_LABEL = {
   PROCESSED: "Processed",
@@ -106,9 +99,11 @@ export default function ResumeSection({ candidateId }: { candidateId: string }) 
   }
 
   function replaceFact(updated: Fact) {
+    const resumeId = updated.resume_id; // always set here: these are the resumes' own facts
+    if (!resumeId) return;
     setFacts((prev) => ({
       ...prev,
-      [updated.resume_id]: prev[updated.resume_id].map((f) => (f.id === updated.id ? updated : f)),
+      [resumeId]: prev[resumeId].map((f) => (f.id === updated.id ? updated : f)),
     }));
   }
 
@@ -170,6 +165,13 @@ export default function ResumeSection({ candidateId }: { candidateId: string }) 
             </button>
           </header>
           {resume.message && <p className="notice">{resume.message}</p>}
+          {resume.status !== "PROCESSED" && (
+            <p>
+              <a href="#manual-facts" onClick={focusManualEntry}>
+                Enter your information manually
+              </a>
+            </p>
+          )}
           {resume.status === "PROCESSED" && (
             <AiExtraction resumeId={resume.id} onDone={() => loadFacts([resume])} />
           )}
@@ -241,7 +243,7 @@ function FactList({ facts, onChange }: { facts: Fact[]; onChange: (f: Fact) => v
         {counts.PENDING_REVIEW} need review · {counts.APPROVED} approved · {counts.REJECTED}{" "}
         rejected
       </p>
-      {CATEGORIES.map(([category, label]) => {
+      {FACT_CATEGORIES.map(([category, label]) => {
         const items = facts.filter((f) => f.category === category);
         if (items.length === 0) return null;
         return (
@@ -266,6 +268,7 @@ function FactItem({ fact, onChange }: { fact: Fact; onChange: (f: Fact) => void 
   const [error, setError] = useState<string | null>(null);
 
   async function send(review: FactReview) {
+    if (!fact.resume_id) return; // only resume facts are listed here
     setBusy(true);
     setError(null);
     try {

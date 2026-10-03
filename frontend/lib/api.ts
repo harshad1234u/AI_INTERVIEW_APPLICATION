@@ -32,17 +32,18 @@ export type Resume = {
   created_at: string;
 };
 
+/** A MANUAL fact (typed in by the candidate) has no resume provenance: those fields are null. */
 export type Fact = {
   id: string;
-  resume_id: string;
+  resume_id: string | null;
   category: FactCategory;
   fact: string;
   extracted_fact: string;
-  source: "RESUME";
-  source_section: string;
-  source_text: string;
+  source: "RESUME" | "MANUAL";
+  source_section: string | null;
+  source_text: string | null;
   status: FactStatus;
-  extracted_by: "RULES" | "AI";
+  extracted_by: "RULES" | "AI" | null;
   created_at: string;
 };
 
@@ -173,6 +174,30 @@ export const reviewFact = (resumeId: string, factId: string, review: FactReview)
     `/api/resumes/${encodeURIComponent(resumeId)}/facts/${encodeURIComponent(factId)}`,
     { method: "PATCH", body: JSON.stringify(review) },
   );
+
+// ---------- manual facts (backend Phase 13): approved as soon as they are added ----------
+
+const manualFactsPath = (candidateId: string) =>
+  `/api/candidates/${encodeURIComponent(candidateId)}/manual-facts`;
+
+export const listManualFacts = (candidateId: string, signal?: AbortSignal) =>
+  request<Fact[]>(manualFactsPath(candidateId), { signal });
+
+export const createManualFact = (candidateId: string, category: FactCategory, fact: string) =>
+  request<Fact>(manualFactsPath(candidateId), {
+    method: "POST",
+    body: JSON.stringify({ category, fact }),
+  });
+
+/** Only the text can change: never the category, source or status. */
+export const editManualFact = (factId: string, fact: string) =>
+  request<Fact>(`/api/manual-facts/${encodeURIComponent(factId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ fact }),
+  });
+
+export const deleteManualFact = (factId: string) =>
+  request<void>(`/api/manual-facts/${encodeURIComponent(factId)}`, { method: "DELETE" });
 
 export const runAiExtraction = (resumeId: string) =>
   request<AIExtraction>(`/api/resumes/${encodeURIComponent(resumeId)}/ai-extraction`, {

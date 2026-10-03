@@ -16,6 +16,7 @@ import {
   getConsent,
   getInterviewPlan,
   getResumeFacts,
+  listManualFacts,
   listResumes,
   planInterview,
   setConsent,
@@ -30,6 +31,7 @@ import {
   ROLE_LABEL,
   errorText,
 } from "@/lib/interview";
+import { MANUAL_LABEL } from "@/lib/profile";
 
 type StepProps = { sessionId: string; onStatus: (status: InterviewStatus) => void };
 
@@ -60,9 +62,10 @@ export function ProfileConfirm({ sessionId, candidateId, onStatus }: StepProps &
   const load = useCallback(async (signal?: AbortSignal) => {
     setLoadError(null);
     try {
-      const resumes = await listResumes(candidateId, signal);
+      const [resumes, manual] = await Promise.all(
+        [listResumes(candidateId, signal), listManualFacts(candidateId, signal)]);
       const lists = await Promise.all(resumes.map((r) => getResumeFacts(r.id, signal)));
-      setFacts(lists.flat());
+      setFacts([...lists.flat(), ...manual]); // resume facts, then the ones the candidate added
     } catch (err) {
       if (!signal?.aborted) setLoadError(errorText(err));
     }
@@ -95,6 +98,7 @@ export function ProfileConfirm({ sessionId, candidateId, onStatus }: StepProps &
               {approved.map((f) => (
                 <li key={f.id}>
                   <span className="badge">{f.category.toLowerCase()}</span> {f.fact}
+                  {f.source === "MANUAL" && <span className="hint"> · {MANUAL_LABEL}</span>}
                 </li>
               ))}
             </ul>
