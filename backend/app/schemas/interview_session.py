@@ -8,9 +8,10 @@ from app.services.interview_state_machine import ClientAction
 
 
 class InterviewSessionCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Empty on purpose: the session is for the signed-in candidate (Phase 12). A candidate_id
+    sent by the client is refused (422), never trusted."""
 
-    candidate_id: uuid.UUID
+    model_config = ConfigDict(extra="forbid")
 
 
 class RetryRequest(BaseModel):

@@ -3,7 +3,7 @@ import uuid
 from typing import Annotated
 
 import anyio.from_thread
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.ai.gateway import ModelGateway, ModelUnavailableError
 from app.ai.profile_agent import extract_profile
 from app.ai.providers import get_model_gateway
+from app.api.deps import current_candidate
 from app.api.routes.candidates import get_candidate
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
@@ -29,10 +30,15 @@ def too_large_detail(settings: Settings) -> str:
     return f"The file is too large. The maximum resume size is {settings.max_resume_size_mb} MB."
 
 
-def get_resume(resume_id: uuid.UUID, db: Session = Depends(get_db)) -> Resume:
-    # Single access point for a resume by id: the ownership check goes here once auth exists.
+def get_resume(
+    resume_id: uuid.UUID,
+    current: Candidate = Depends(current_candidate),
+    db: Session = Depends(get_db),
+) -> Resume:
+    """Single access point for a resume by id. Another candidate's resume is a 404, exactly like
+    one that does not exist (A4)."""
     resume = db.get(Resume, resume_id)
-    if resume is None:
+    if resume is None or resume.candidate_id != current.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Resume not found")
     return resume
 
@@ -76,12 +82,13 @@ def _read_pdf(file: UploadFile, settings: Settings) -> bytes:
 
 @router.post("/resumes", response_model=ResumeResponse, status_code=status.HTTP_201_CREATED)
 def upload_resume(
-    candidate_id: Annotated[uuid.UUID, Form()],
     file: Annotated[UploadFile, File()],
+    candidate: Candidate = Depends(current_candidate),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ResumeResponse:
-    candidate = get_candidate(candidate_id, db)
+    """For the signed-in candidate. The form carries only the file: a client-supplied candidate
+    id is never trusted."""
     result = process_pdf(_read_pdf(file, settings))
     # Resume and facts are written in one transaction with the final status: never half-processed.
     resume = Resume(

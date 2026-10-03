@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from typing import Annotated
 
 import anyio.from_thread
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -14,6 +15,7 @@ from app.ai.gateway import CallRecord, ModelGateway
 from app.ai.interviewer_agent import WordingRequest, propose_wording
 from app.ai.planner_agent import PlannerOutcome, propose_plan
 from app.ai.providers import get_model_gateway
+from app.api.deps import current_candidate
 from app.api.routes.candidates import get_candidate
 from app.db.session import get_db
 from app.models import AnswerEvaluation, Candidate, InterviewQuestion, InterviewSession
@@ -108,12 +110,35 @@ router = APIRouter(tags=["interview sessions"])
 NOT_FOUND = "Interview session not found"
 
 
-def get_interview_session(session_id: uuid.UUID, db: Session = Depends(get_db)) -> InterviewSession:
-    # Single access point for a session by id: the ownership check goes here once auth exists.
+def get_interview_session(
+    session_id: uuid.UUID,
+    current: Candidate = Depends(current_candidate),
+    db: Session = Depends(get_db),
+) -> InterviewSession:
+    """Single access point for a session by id. Another candidate's session is a 404, exactly
+    like one that does not exist (A4)."""
     session = db.get(InterviewSession, session_id)
-    if session is None:
+    if session is None or session.candidate_id != current.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     return session
+
+
+def owned_session_id(
+    session_id: uuid.UUID,
+    current: Candidate = Depends(current_candidate),
+    db: Session = Depends(get_db),
+) -> uuid.UUID:
+    """The same check for routes whose service locks and loads the session itself. Reads one
+    column, so the service's own SELECT ... FOR UPDATE still loads fresh state. A session never
+    changes owner, so checking before the lock is safe."""
+    owner = db.scalar(
+        select(InterviewSession.candidate_id).where(InterviewSession.id == session_id))
+    if owner != current.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
+    return session_id
+
+
+OwnedSessionId = Annotated[uuid.UUID, Depends(owned_session_id)]
 
 
 def _call_summaries(records: list[CallRecord]) -> list[ModelCallSummary]:
@@ -147,9 +172,10 @@ def _commit(db: Session) -> None:
     status_code=status.HTTP_201_CREATED,
 )
 def create_interview_session(
-    body: InterviewSessionCreate, db: Session = Depends(get_db)
+    body: InterviewSessionCreate,
+    candidate: Candidate = Depends(current_candidate),
+    db: Session = Depends(get_db),
 ) -> InterviewSession:
-    candidate = get_candidate(body.candidate_id, db)
     try:
         session = create_session(db, candidate.id)
     except ActiveSessionExists as exc:
@@ -193,7 +219,9 @@ def list_candidate_interview_sessions(
     "/interview-sessions/{session_id}/actions", response_model=InterviewSessionResponse
 )
 def act_on_interview_session(
-    session_id: uuid.UUID, body: SessionActionRequest, db: Session = Depends(get_db)
+    body: SessionActionRequest,
+    session_id: OwnedSessionId,
+    db: Session = Depends(get_db),
 ) -> InterviewSession:
     try:
         # Every interview write first applies the time limit (Phase 7, §6.3). The closure is
@@ -225,7 +253,7 @@ def delete_interview_session(
 
 @router.post("/interview-sessions/{session_id}/plan", response_model=InterviewPlanResult)
 def plan_interview_session(
-    session_id: uuid.UUID,
+    session_id: OwnedSessionId,
     settings: PlanSettings,
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
@@ -289,7 +317,9 @@ def read_interview_plan(
 
 @router.put("/interview-sessions/{session_id}/ai-consent", response_model=ConsentState)
 def put_ai_consent(
-    session_id: uuid.UUID, body: ConsentRequest, db: Session = Depends(get_db)
+    body: ConsentRequest,
+    session_id: OwnedSessionId,
+    db: Session = Depends(get_db),
 ) -> ConsentState:
     """Grant or withdraw consent to send this session's data to an AI provider. Governs the
     planner and the interviewer. Data already sent cannot be recalled by withdrawing."""
@@ -353,7 +383,7 @@ def _turn_result(turn: TurnOutcome) -> TurnResult:
 
 @router.post("/interview-sessions/{session_id}/questions/next", response_model=TurnResult)
 def next_question(
-    session_id: uuid.UUID,
+    session_id: OwnedSessionId,
     body: NextQuestionRequest,
     db: Session = Depends(get_db),
     gateway: ModelGateway | None = Depends(get_model_gateway),
@@ -381,7 +411,9 @@ def next_question(
 
 @router.post("/interview-sessions/{session_id}/answers", response_model=AnswerResult)
 def answer_question(
-    session_id: uuid.UUID, body: AnswerRequest, db: Session = Depends(get_db)
+    body: AnswerRequest,
+    session_id: OwnedSessionId,
+    db: Session = Depends(get_db),
 ) -> AnswerResult:
     """Store the answer to the open question (NOT_EVALUATED). Late answers are refused and never
     stored. Repeating a stored answer exactly changes nothing."""
@@ -430,7 +462,7 @@ def read_questions(
 @router.post("/interview-sessions/{session_id}/questions/{question_id}/evaluation",
              response_model=EvaluationResult)
 def evaluate_answer(
-    session_id: uuid.UUID,
+    session_id: OwnedSessionId,
     question_id: uuid.UUID,
     body: EvaluationRequest,
     db: Session = Depends(get_db),
@@ -486,7 +518,9 @@ def read_evaluations(
 
 @router.post("/interview-sessions/{session_id}/report", response_model=ReportResult)
 def generate_report(
-    session_id: uuid.UUID, body: ReportRequest, db: Session = Depends(get_db)
+    body: ReportRequest,
+    session_id: OwnedSessionId,
+    db: Session = Depends(get_db),
 ) -> ReportResult:
     """REPORT_GENERATION -> COMPLETED once every answer has been evaluated, and the report. Built
     by code from stored data: no model call and nothing stored. A completed session returns the
@@ -523,7 +557,9 @@ def read_report(
 @router.post("/interview-sessions/{session_id}/retry", response_model=InterviewPlanView,
              status_code=status.HTTP_201_CREATED)
 def retry_interview_session(
-    session_id: uuid.UUID, body: RetryRequest, db: Session = Depends(get_db)
+    body: RetryRequest,
+    session_id: OwnedSessionId,
+    db: Session = Depends(get_db),
 ) -> InterviewPlanView:
     """A new READY session, for the same candidate, with the completed interview's topics to
     practise whose facts are still valid, copied word for word. No model call; the source is
