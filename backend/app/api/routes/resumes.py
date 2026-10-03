@@ -4,7 +4,7 @@ from typing import Annotated
 
 import anyio.from_thread
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -16,8 +16,14 @@ from app.api.routes.candidates import get_candidate
 from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.models import Candidate, CandidateFact, ProviderCall, Resume
-from app.models.resume import Extractor, FactSource, ResumeStatus
-from app.schemas.resume import AIExtractionResponse, FactResponse, FactUpdate, ResumeResponse
+from app.models.resume import Extractor, FactSource, FactStatus, ResumeStatus
+from app.schemas.resume import (
+    AIExtractionResponse,
+    FactResponse,
+    FactUpdate,
+    PendingReview,
+    ResumeResponse,
+)
 from app.services.limits import AI_EXTRACTION, RESUME_UPLOAD, LimitReached, charge_ai, consume
 from app.services.resume_extractor import process_pdf
 
@@ -184,6 +190,23 @@ def review_fact(
         setattr(fact, field, value)
     _commit(db)
     return fact
+
+
+@router.post("/resumes/{resume_id}/facts/review-pending", response_model=list[FactResponse])
+def review_pending_facts(
+    body: PendingReview,
+    resume: Resume = Depends(get_resume),
+    db: Session = Depends(get_db),
+) -> list[CandidateFact]:
+    """Approve (or reject) every fact of this resume that still needs review, in one step: the
+    candidate's explicit decision, as with one fact. Facts already decided, other resumes'
+    facts and manual facts are never touched."""
+    db.execute(update(CandidateFact)
+               .where(CandidateFact.resume_id == resume.id,
+                      CandidateFact.status == FactStatus.PENDING_REVIEW)
+               .values(status=body.status))
+    _commit(db)
+    return list_facts(resume, db)
 
 
 @router.post("/resumes/{resume_id}/ai-extraction", response_model=AIExtractionResponse)

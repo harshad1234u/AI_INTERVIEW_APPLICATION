@@ -86,9 +86,87 @@ def test_headings_are_case_and_punctuation_insensitive_whole_lines() -> None:
     ]
 
 
-def test_inline_heading_is_not_guessed() -> None:
-    # "Skills: ..." on one line is content, not a heading: nothing is extracted rather than guessed.
-    assert facts_of("Skills: Python, React") == []
+def test_inline_headings_outside_a_section_make_one_line_sections() -> None:
+    # A minimal resume with no heading lines at all: "Label: values" is read, still verbatim.
+    text = "Sanjay Kumar\nSkills: Python, SQL, Power BI\nEducation: B.Com, Madras University, 2024\n" \
+        "Looking for an entry-level data analyst role."
+    assert facts_of(text) == [(C.SKILL, "Python"), (C.SKILL, "SQL"), (C.SKILL, "Power BI"),
+                              (C.EDUCATION, "B.Com, Madras University, 2024")]
+
+
+def test_an_inline_label_inside_a_section_stays_content() -> None:
+    # Inside a project, "Tech Stack: React" is a detail of that project, never a new section;
+    # and the lines after an inline section still belong to the section they were in.
+    assert facts_of("Projects\nChatApp\nTech Stack: React\nQuiz App") == [
+        (C.PROJECT, "ChatApp"), (C.PROJECT, "Quiz App")]
+    assert facts_of("Summary\nSkills: Go\nI like teams.") == [(C.SKILL, "Go")]
+
+
+# ---------- resume variability: no fixed template, order, names or count of sections ----------
+
+
+def headings(*lines: str) -> list[tuple[str, C | None]]:
+    return [(s.heading, s.category) for s in detect_sections(["\n".join(lines)])]
+
+
+def test_custom_and_semantic_section_names() -> None:
+    assert headings("Professional Experience", "Selected Work", "Technical Competencies",
+                    "Open Source", "Leadership", "Volunteer Work", "Academic Background",
+                    "Research Experience", "Publications", "Employment", "Core Competencies",
+                    "Honors & Awards", "Teaching Experience", "Major Projects",
+                    "Licenses & Certifications") == [
+        ("Professional Experience", C.EXPERIENCE), ("Selected Work", C.PROJECT),
+        ("Technical Competencies", C.SKILL), ("Open Source", C.PROJECT), ("Leadership", None),
+        ("Volunteer Work", C.EXPERIENCE), ("Academic Background", C.EDUCATION),
+        ("Research Experience", C.EXPERIENCE), ("Publications", None),
+        ("Employment", C.EXPERIENCE), ("Core Competencies", C.SKILL), ("Honors & Awards", None),
+        ("Teaching Experience", C.EXPERIENCE), ("Major Projects", C.PROJECT),
+        ("Licenses & Certifications", C.CERTIFICATION)]
+
+
+def test_decorated_headings() -> None:
+    assert headings("01. SKILLS", "EDUCATION ——", "C E R T I F I C A T I O N S",
+                    "02. Work Experience", "My Projects:", "# Internships", "▸ Awards") == [
+        ("SKILLS", C.SKILL), ("EDUCATION", C.EDUCATION),
+        ("C E R T I F I C A T I O N S", C.CERTIFICATION), ("Work Experience", C.EXPERIENCE),
+        ("My Projects", C.PROJECT), ("Internships", C.EXPERIENCE), ("Awards", None)]
+
+
+def test_content_lines_are_not_mistaken_for_headings() -> None:
+    assert headings("Skills", "Built Scalable Projects.", "built scalable projects",
+                    "Senior Software Engineer, Razorpay", "2 Years Experience",
+                    "• Projects") == [("Skills", C.SKILL)]
+
+
+def test_an_unknown_section_ends_the_previous_one() -> None:
+    # Before: research lines were read as education facts.
+    text = "Education\nPh.D. Computer Science, IIT Madras, 2024\nResearch Experience\n" \
+        "Research Assistant, Systems Lab\nStudying robustness of graph neural networks.\n" \
+        "Publications\nK. Iyer, Robust Message Passing, NeurIPS 2023."
+    assert facts_of(text) == [(C.EDUCATION, "Ph.D. Computer Science, IIT Madras, 2024"),
+                              (C.EXPERIENCE, "Research Assistant, Systems Lab")]
+
+
+def test_section_order_and_count_do_not_matter() -> None:
+    a = facts_of("Skills\nGo\nExperience\nIntern, Zoho\nEducation\nB.Tech, VIT")
+    b = facts_of("Education\nB.Tech, VIT\nExperience\nIntern, Zoho\nSkills\nGo")
+    assert sorted(a) == sorted(b) and len(a) == 3
+    # No projects, no experience: what is there is still read.
+    assert facts_of("Education\nB.Sc. Mathematics, 2025\nSkills\nR, Excel") == [
+        (C.EDUCATION, "B.Sc. Mathematics, 2025"), (C.SKILL, "R"), (C.SKILL, "Excel")]
+
+
+def test_dates_at_the_end_of_entries_are_left_out_of_the_fact() -> None:
+    text = "Projects\nLibrary Management System 2024\nProject Juniper 2023\n" \
+        "Experience\nSenior Software Engineer, Razorpay Mar 2022 – Present\n" \
+        "Marketing Lead, Acme March 2019 to June 2020\nIntern, Zoho (2023)"
+    facts = extract_facts(detect_sections([text]))
+    assert [(f.category, f.fact) for f in facts] == [
+        (C.PROJECT, "Library Management System"), (C.PROJECT, "Project Juniper"),
+        (C.EXPERIENCE, "Senior Software Engineer, Razorpay"),
+        (C.EXPERIENCE, "Marketing Lead, Acme"), (C.EXPERIENCE, "Intern, Zoho")]
+    for f in facts:  # still verbatim, and the full line (with its dates) is the provenance
+        assert f.fact in f.source_text and f.source_text in text.splitlines()
 
 
 def test_skill_list_rules() -> None:

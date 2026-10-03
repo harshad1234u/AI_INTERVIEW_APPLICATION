@@ -606,3 +606,54 @@ def test_database_unavailable_is_503(dead_database_client: TestClient) -> None:
     res = upload(dead_database_client)
     assert res.status_code == 503
     assert res.json() == {"detail": "Service temporarily unavailable. Please try again."}
+
+
+# ---------- reviewing every pending fact at once ----------
+
+
+def review_pending(client: TestClient, resume_id: str, **body: object):
+    return client.post(f"/api/resumes/{resume_id}/facts/review-pending", json=body)
+
+
+def test_approving_all_pending_facts_touches_only_this_resumes_pending_facts(
+    client: TestClient, candidate_id: str
+) -> None:
+    first, second = uploaded(client), uploaded(client)
+    [rejected, approved, *_] = facts(client, first["id"])
+    client.patch(f"/api/resumes/{first['id']}/facts/{rejected['id']}", json={"status": "REJECTED"})
+    client.patch(f"/api/resumes/{first['id']}/facts/{approved['id']}",
+                 json={"fact": "Edited", "status": "APPROVED"})
+    manual = client.post(f"/api/candidates/{candidate_id}/manual-facts",
+                         json={"category": "SKILL", "fact": "Kotlin"}).json()
+    res = review_pending(client, first["id"], status="APPROVED")
+    assert res.status_code == 200
+    after = {f["id"]: f for f in res.json()}
+    assert after == {f["id"]: f for f in facts(client, first["id"])}  # returns the stored list
+    assert after[rejected["id"]]["status"] == "REJECTED"  # a decision is never overridden
+    assert (after[approved["id"]]["status"], after[approved["id"]]["fact"]) == ("APPROVED", "Edited")
+    assert {f["status"] for i, f in after.items() if i not in {rejected["id"]}} == {"APPROVED"}
+    assert {f["status"] for f in facts(client, second["id"])} == {"PENDING_REVIEW"}
+    assert client.get(f"/api/candidates/{candidate_id}/manual-facts").json() == [manual]
+
+
+def test_rejecting_all_pending_facts_then_the_profile_can_be_confirmed(
+    client: TestClient, candidate_id: str
+) -> None:
+    resume = uploaded(client)
+    sid = client.post("/api/interview-sessions", json={}).json()["id"]
+    confirm = lambda: client.post(f"/api/interview-sessions/{sid}/actions",  # noqa: E731
+                                  json={"action": "CONFIRM_PROFILE"})
+    assert confirm().status_code == 409  # facts still pending
+    assert {f["status"] for f in review_pending(client, resume["id"], status="REJECTED").json()} \
+        == {"REJECTED"}
+    assert confirm().json()["status"] == "INTERVIEW_PLANNING"
+
+
+@pytest.mark.parametrize("body", [{"status": "PENDING_REVIEW"}, {}, {"status": "APPROVED", "x": 1},
+                                  {"status": "approved"}])
+def test_review_pending_bodies_are_validated(client: TestClient, candidate_id: str,
+                                             body: dict) -> None:
+    resume = uploaded(client)
+    assert client.post(f"/api/resumes/{resume['id']}/facts/review-pending",
+                       json=body).status_code == 422
+    assert {f["status"] for f in facts(client, resume["id"])} == {"PENDING_REVIEW"}

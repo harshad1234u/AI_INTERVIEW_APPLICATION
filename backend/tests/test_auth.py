@@ -533,6 +533,7 @@ def intruder_requests(w: dict, mine: dict) -> list[tuple[str, str, dict | None]]
         ("PATCH", f"/api/resumes/{w['resume']}/facts/{w['fact']}", {"status": "REJECTED"}),
         ("PATCH", f"/api/resumes/{mine['resume']}/facts/{w['fact']}", {"status": "REJECTED"}),
         ("POST", f"/api/resumes/{w['resume']}/ai-extraction", None),
+        ("POST", f"/api/resumes/{w['resume']}/facts/review-pending", {"status": "APPROVED"}),
         ("GET", f"/api/candidates/{w['candidate']}/manual-facts", None),
         ("POST", f"/api/candidates/{w['candidate']}/manual-facts",
          {"category": "SKILL", "fact": "Injected"}),
@@ -593,7 +594,7 @@ def test_cross_candidate_requests_are_404_and_change_nothing(
                                             "Fact not found", "Interview session not found",
                                             "Question not found"}, (method, url)
             count += 1
-    assert count == 66
+    assert count == 68
     assert snapshot(db_session) == before
 
 

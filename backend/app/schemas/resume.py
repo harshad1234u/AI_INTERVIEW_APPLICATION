@@ -94,6 +94,14 @@ class FactUpdate(PartialUpdate):
     status: Literal[FactStatus.APPROVED, FactStatus.REJECTED] | None = None
 
 
+class PendingReview(BaseModel):
+    """One decision for every fact of a resume that is still PENDING_REVIEW."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal[FactStatus.APPROVED, FactStatus.REJECTED]
+
+
 class ManualFactCreate(BaseModel):
     """A fact the candidate types in (Phase 13). Same text rules as editing a resume fact."""
 
