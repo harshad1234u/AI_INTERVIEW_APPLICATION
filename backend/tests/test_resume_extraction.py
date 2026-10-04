@@ -68,8 +68,9 @@ def test_every_fact_is_verbatim_resume_text() -> None:
     facts = extract_facts(detect_sections([SAMPLE]))
     assert facts
     for f in facts:
-        assert f.fact in f.source_text
-        assert f.source_text in lines
+        # One line: the fact is inside that line. A grouped education entry: every " · " piece is.
+        assert all(part in f.source_text for part in f.fact.split(" · "))
+        assert all(line in lines for line in f.source_text.split("\n"))
 
 
 def test_name_contact_and_non_fact_sections_are_not_facts() -> None:
@@ -214,3 +215,77 @@ def test_normalize_text_expands_ligatures_only() -> None:
     assert normalize_text("AWS Certiﬁed, ﬂask, eﬀort, O(n²), Java™") == (
         "AWS Certified, flask, effort, O(n²), Java™"
     )
+
+
+EDU_LAYOUTS = {
+    # college, then degree, then score; school, then class, then percentage
+    "college-first": (
+        "Education\n"
+        "K Ramakrishnan College of Technology\n"
+        "B.E. Computer Science and Engineering\n"
+        "CGPA: 8.5\n"
+        "Sri Vidya Matric Higher Secondary School\n"
+        "Class XII\n"
+        "Percentage: 92%\n"
+    ),
+    # degree and college on one line, score under it; class and school on one line, percentage under
+    "head-lines": (
+        "Education\n"
+        "B.E. Computer Science — K Ramakrishnan College of Technology  2024 – 2028\n"
+        "CGPA: 8.5 / 10\n"
+        "Class XII — Sri Vidya Matric School  2024\n"
+        "92%\n"
+    ),
+    # degree, college, score; then class 12th, school, percentage
+    "degree-first": (
+        "Education\n"
+        "B.Tech Information Technology\n"
+        "Anna University\n"
+        "CGPA 8.1\n"
+        "12th Standard\n"
+        "Govt Higher Secondary School\n"
+        "88.4%\n"
+    ),
+}
+
+
+def education_facts(text: str):
+    return [f for f in extract_facts(detect_sections([text])) if f.category is C.EDUCATION]
+
+
+def test_education_spread_over_lines_is_one_fact_per_entry() -> None:
+    for name, text in EDU_LAYOUTS.items():
+        facts = education_facts(text)
+        assert len(facts) == 2, (name, [f.fact for f in facts])
+        college, school = facts
+        assert "cgpa" in college.fact.lower(), name
+        assert "School" in school.fact and "%" in school.fact, name
+        for other in ("CGPA", "College", "University"):
+            assert other not in school.fact, (name, other)
+
+
+def test_education_pieces_stay_verbatim_and_dates_are_left_out() -> None:
+    first = education_facts(EDU_LAYOUTS["college-first"])[0]
+    assert first.fact == (
+        "K Ramakrishnan College of Technology · B.E. Computer Science and Engineering · CGPA: 8.5"
+    )
+    assert first.source_text.split("\n") == [
+        "K Ramakrishnan College of Technology",
+        "B.E. Computer Science and Engineering",
+        "CGPA: 8.5",
+    ]
+    dated = education_facts(EDU_LAYOUTS["head-lines"])[0]
+    assert dated.fact.startswith("B.E. Computer Science — K Ramakrishnan College of Technology")
+    assert all(part in dated.source_text for part in dated.fact.split(" · "))
+
+
+def test_a_single_line_education_entry_is_unchanged_and_bullets_stay_separate() -> None:
+    text = (
+        "Education\n"
+        "B.Tech in Computer Science, XYZ University, 2021 – 2025\n"
+        "• Relevant coursework: DSA, DBMS\n"
+    )
+    assert facts_of(text) == [
+        (C.EDUCATION, "B.Tech in Computer Science, XYZ University, 2021 – 2025"),
+        (C.EDUCATION, "Relevant coursework: DSA, DBMS"),
+    ]

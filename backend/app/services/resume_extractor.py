@@ -2,8 +2,10 @@
 
 Resume content is untrusted *data*. It is only split and pattern-matched here, never evaluated or
 followed. Every extracted fact is a verbatim substring of one resume line (kept as source_text);
-nothing is inferred, summarised or invented. Facts are stored as PENDING_REVIEW and only an
-explicit candidate action can approve them.
+nothing is inferred, summarised or invented. The one grouping exception is an education entry that
+a resume spreads over several lines (college, degree, CGPA, school, class, percentage): its fact
+joins the entry's lines with " · ", each piece still verbatim, and source_text keeps those lines.
+Facts are stored as PENDING_REVIEW and only an explicit candidate action can approve them.
 
 This stays the default path on every upload, AI or not. The optional ProfileAgent
 (app/ai/profile_agent.py) emits the same ExtractedFact shape through the same PENDING_REVIEW path.
@@ -135,6 +137,27 @@ DATE_ONLY = re.compile(
 # Non-bulleted detail lines inside a project entry, e.g. "Tech Stack: React, FastAPI".
 DETAIL_LABELS = {"tech stack", "technologies", "technology", "tools", "stack", "tech", "link",
                  "links", "github", "role", "description"}
+
+
+# Education entries are often written one detail per line. A line is an entry *head* when it names
+# an institution or a degree / school level; a score or a date line belongs to the entry before it.
+EDU_INSTITUTION = re.compile(
+    r"\b(?:college|university|institute|institution|school|academy|polytechnic|vidyalaya|"
+    r"vidyashram|campus|iit|iiit|nit|vit|srm)\b", re.IGNORECASE)
+EDU_LEVEL_WORDS = re.compile(
+    r"\b(?:bachelors?(?:'s)?|masters?(?:'s)?|diploma|"
+    r"(?:class|std|standard|grade)\.?\s*(?:x{1,2}i{0,2}|10|11|12)(?:th)?|(?:10|12)th|"
+    r"(?:xii|x)\s*(?:std|standard|class))\b", re.IGNORECASE)
+# "Higher Secondary" names a level on its own line but is part of a school's name next to "School".
+EDU_SOFT_LEVEL_WORDS = re.compile(
+    r"\b(?:higher secondary|senior secondary|secondary school|intermediate|pre[- ]?university)\b",
+    re.IGNORECASE)
+EDU_LEVEL_ABBREVIATIONS = re.compile(
+    r"\b(?:B\.?\s?E|M\.?\s?E|B\.?\s?Tech|M\.?\s?Tech|B\.?\s?Sc|M\.?\s?Sc|B\.?\s?Com|"
+    r"BCA|MCA|MBA|Ph\.?D|HSC|SSLC|SSC|CBSE|ICSE|ISC)\b")
+EDU_SCORE = re.compile(
+    r"^\W*(?:cgpa|gpa|cpi|percentage|percent|marks|aggregate|score|grade|result)\b"
+    r"|^\W*\d{1,3}(?:\.\d+)?\s*(?:%|/\s*(?:10|4|100)\b|cgpa|gpa)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -295,12 +318,16 @@ def extract_facts(sections: list[Section]) -> list[ExtractedFact]:
     for section in sections:
         if section.category is None:
             continue
-        for line in section.lines:
-            for value in EXTRACTORS[section.category](line):
-                key = (section.category, value.lower())
-                if key not in seen:
-                    seen.add(key)
-                    facts.append(ExtractedFact(section.category, value, section.heading, line))
+        if section.category is FactCategory.EDUCATION:
+            pairs = _education_entries(section.lines)
+        else:
+            pairs = [(value, line) for line in section.lines
+                     for value in EXTRACTORS[section.category](line)]
+        for value, source in pairs:
+            key = (section.category, value.lower())
+            if key not in seen:
+                seen.add(key)
+                facts.append(ExtractedFact(section.category, value, section.heading, source))
     return facts
 
 
@@ -377,6 +404,60 @@ def _experience(line: str) -> list[str]:
 def _whole_line(line: str) -> list[str]:
     text = _strip_bullet(line)[1]
     return [text] if _usable(text) else []
+
+
+def _education_entries(lines: list[str]) -> list[tuple[str, str]]:
+    """(fact, source_text) per education entry. A one-line entry is that line, as before. An entry
+    spread over lines (college / degree / CGPA / school / class / percentage) is one fact with
+    its pieces joined by " · " (each verbatim, dates left out) and those lines as the source."""
+    entries: list[dict[str, Any]] = []
+    for raw in lines:
+        bullet, text = _strip_bullet(raw)
+        text = text.strip()
+        if not text:
+            continue
+        is_inst = bool(EDU_INSTITUTION.search(text))
+        is_level = bool(
+            EDU_LEVEL_WORDS.search(text) or EDU_LEVEL_ABBREVIATIONS.search(text)
+            or (EDU_SOFT_LEVEL_WORDS.search(text) and not is_inst)
+        )
+        is_score = bool(EDU_SCORE.search(text)) and not (is_inst or is_level)
+        is_date = bool(DATE_ONLY.fullmatch(text))
+        head = is_inst or is_level
+        current = entries[-1] if entries else None
+        if bullet and not (is_score or is_date):
+            # A bullet that is not a score is a detail of its own (e.g. coursework): standalone.
+            if _usable(text):
+                entries.append({"parts": [text], "lines": [raw], "inst": False, "level": False,
+                                "closed": True})
+            continue
+        starts_new = (current is None or current["closed"]
+                      or (is_inst and current["inst"]) or (is_level and current["level"]))
+        if (is_score or is_date) and current is not None and not current["closed"]:
+            starts_new = False
+        if starts_new:
+            if not (head or is_score or _usable(text)):
+                continue
+            current = {"parts": [], "lines": [], "inst": False, "level": False, "closed": False}
+            entries.append(current)
+        assert current is not None
+        current["lines"].append(raw)
+        current["inst"] = current["inst"] or is_inst
+        current["level"] = current["level"] or is_level
+        # "92%" has no letter, so _usable would drop it: a score line is wanted as written.
+        if not is_date and (_usable(text) or (is_score and len(text) <= 40)):
+            current["parts"].append(text)
+    result: list[tuple[str, str]] = []
+    for entry in entries:
+        fact = ""
+        for part in entry["parts"]:
+            joined = f"{fact} · {part}" if fact else part
+            if len(joined) > FACT_MAX_LENGTH:
+                break  # the rest stays in the source lines, never cut mid-word
+            fact = joined
+        if fact:
+            result.append((fact, "\n".join(entry["lines"])))
+    return result
 
 
 EXTRACTORS = {
