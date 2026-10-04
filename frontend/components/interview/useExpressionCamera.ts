@@ -12,6 +12,7 @@ import {
   cameraErrorText,
   classify,
   emptyCounts,
+  liveBreakdown,
   liveLabel,
   nextPace,
   toObservation,
@@ -24,6 +25,8 @@ export type Camera = {
   /** Why the camera is off or unavailable, in the candidate's words. */
   message: string | null;
   label: string;
+  /** The recent samples as shares of looks, for the small live bar. */
+  breakdown: { look: string; percent: number }[];
   attach: (video: HTMLVideoElement | null) => void;
   enable: () => Promise<void>;
   disable: () => void;
@@ -220,6 +223,6 @@ export function useExpressionCamera(): Camera {
   useEffect(() => stopStream, [stopStream]);
 
   return {
-    state, message, label: liveLabel(recent), attach, enable, disable, setQuestion, setPaused, take,
+    state, message, label: liveLabel(recent), breakdown: liveBreakdown(recent), attach, enable, disable, setQuestion, setPaused, take,
   };
 }

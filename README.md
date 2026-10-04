@@ -181,6 +181,20 @@ npm run dev                   # http://localhost:3000
 **Log out**), a backend status indicator, the profile (view → edit → delete), the "Your skills
 and projects" card for facts typed in by hand, and the resume upload and review card. Signed-out visitors are sent to `/login`.
 
+### Use it from another device (optional)
+
+`http://localhost:3000` is the supported way to run it. To open it by network address (for
+example `http://192.168.1.20:3000` from a phone on the same Wi-Fi) the browser, the page and the
+API must share that address, because the sign-in cookie is not sent across different hosts:
+
+1. `backend/.env`: `API_HOST=0.0.0.0` and `CORS_ORIGINS=http://localhost:3000,http://192.168.1.20:3000`
+2. `frontend/.env.local`: `NEXT_PUBLIC_API_URL=http://192.168.1.20:8000`, then restart `npm run dev`
+   (`next.config.ts` already allows the private address ranges for the dev server).
+3. Allow ports 3000 and 8000 through the firewall, on a network you trust.
+
+The **camera and microphone only work on `localhost` or HTTPS**, so voice mode and the camera are
+unavailable on a plain `http://192.168…` address; typing works as always.
+
 ## Authentication API
 
 All errors return JSON `{"detail": ...}`. Database internals, SQL and driver messages are never
@@ -1293,6 +1307,31 @@ The plan screen and the report each offer **Download** and **Print or save as PD
 | Never | Read by the interviewer, the evaluator, the report's criteria, topics to practise or retry (a test scans that code) |
 | Control | Enable / Disable at any time on the plan, interview and pause screens; the camera is released on Disable, on any failure, and when the interview screens are left |
 | Failures | Permission denied, no camera, camera in use or disconnected, unsupported browser, model load failure, a slow device, no face and several faces each show a plain message and the interview continues |
+| Live panel | While the camera is on, the panel shows the last few samples as small bars ("neutral 60%, smiling 40%"). This is on-screen only: it is not sent, stored or put in the report, and it never says "nervous", "confident" or any feeling |
+
+## Optional voice mode (speak and listen)
+
+The PRD's optional voice path (§22-23), text-first: the interviewer **reads each question aloud**
+and the candidate can **answer by speaking**. Voice is only a way to hear and enter text; the
+backend is unchanged and only ever receives the reviewed text answer.
+
+| | |
+|---|---|
+| Reading questions | The browser's `speechSynthesis`, chunked by sentence (long utterances are cut off by some engines). A voice installed on the device is preferred over an online one, so question text stays on the device where possible |
+| Listening | The browser's `SpeechRecognition` (Chrome and Edge). It is the **browser vendor's service** (Google or Microsoft) that turns audio into text: the voice is sent there, never recorded by this app and never sent to this app's server. The page says so before the microphone is used |
+| Review before sending | Recognised phrases are appended to the answer box, where they can be edited like typed text (PRD §22). Nothing is sent until **Send answer** |
+| Controls | Off by default. Turn on at the plan screen or in the interview; read again, stop reading, start / stop & review speaking, optional auto-read and auto-listen, speech language (English India / US / UK) and reading speed. Preferences are kept in this browser only (`localStorage`) |
+| Speech measurements | After speaking: words, seconds, words a minute and counted filler sounds (um, uh, you know), as a neutral observation on the page (PRD §21C). Under 8 words or 5 seconds: "too short for meaningful speech measurements". Not sent, stored or scored; never a judgement of nervousness, confidence or accent |
+| Fallbacks | No speech engine, no microphone, permission denied, no speech heard, a network failure of the browser's service: each shows a plain message and typing works as always. Pausing, sending, leaving the interview or discarding it stops the speaker and releases the microphone |
+| Code | `lib/voice.ts` (pure, tested), `components/interview/useVoice.ts` (engines), `VoicePanel.tsx` (UI) |
+
+## Interface design
+
+One small design system in `frontend/app/globals.css`: tokens for light and dark themes (light by
+default; a header toggle remembers the choice in this browser and is applied before first paint,
+so there is no flash), a header with navigation and the signed-in chip, cards, accessible focus
+rings, reduced-motion support, a responsive layout from phone to desktop, an animated interviewer
+orb for voice mode and a framed camera preview.
 
 ## Usage limits (abuse and cost controls)
 

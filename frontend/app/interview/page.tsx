@@ -1,19 +1,17 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import AccountBar from "@/components/AccountBar";
 import InterviewFlow from "@/components/interview/InterviewFlow";
 
 export const metadata: Metadata = {
   title: "Interview — AI Interview Coach",
-  description: "A text practice interview: questions, answers, feedback and your report.",
+  description: "A practice interview you can type or speak: questions, answers, feedback and your report.",
 };
 
 export default function InterviewPage() {
   return (
-    <main>
-      <AccountBar />
+    <main id="content">
       <p>
-        <Link href="/">← Your profile</Link>
+        <Link href="/" className="back-link">← Your profile</Link>
       </p>
       <h1>Practice interview</h1>
       <p className="lead">

@@ -68,6 +68,19 @@ export function liveLabel(recent: ReturnType<typeof classify>[]): string {
   return n / looks.length >= 0.6 ? `Mostly ${top}` : "Mixed";
 }
 
+/** The recent samples as shares of what they looked like (e.g. neutral 60%, smiling 40%), largest
+ * first. Only analysed samples count. Used for a small live bar: a look, never a feeling. */
+export function liveBreakdown(recent: ReturnType<typeof classify>[]): { look: string; percent: number }[] {
+  const looks = recent.filter((r) => r !== "no_face" && r !== "multiple_faces")
+    .map((r) => LOOKS[r as Expression]);
+  if (looks.length === 0) return [];
+  const tally = new Map<string, number>();
+  looks.forEach((l) => tally.set(l, (tally.get(l) ?? 0) + 1));
+  return [...tally.entries()]
+    .map(([look, n]) => ({ look, percent: Math.round((n / looks.length) * 100) }))
+    .sort((a, b) => b.percent - a.percent || (a.look < b.look ? -1 : 1));
+}
+
 // Sampling pace: about one sample a second, slower on a slow device, and off when the device
 // cannot keep up, so the interview itself never waits for the camera.
 export const BASE_INTERVAL_MS = 1000;

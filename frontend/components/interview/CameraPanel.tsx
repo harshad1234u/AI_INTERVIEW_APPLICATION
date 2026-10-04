@@ -12,30 +12,51 @@ const STATUS: Record<Camera["state"], string> = {
 };
 
 /** The optional camera. `intro` shows the full explanation (before the interview starts). */
-export default function CameraPanel({ camera: { state, message, label, attach, enable, disable },
+export default function CameraPanel({ camera: { state, message, label, breakdown, attach, enable, disable },
                                       intro = false }: { camera: Camera; intro?: boolean }) {
   const on = state === "starting" || state === "loading" || state === "active";
   return (
-    <section className={`camera${intro ? " camera-intro" : ""}`} aria-labelledby="camera-heading">
+    <section className={`camera${intro ? " camera-intro" : ""}${on ? " camera-on" : ""}`}
+             aria-labelledby="camera-heading">
       <h3 id="camera-heading">{COPY.cameraTitle}</h3>
       {(intro || !on) && <p className="hint">{COPY.cameraExplain}</p>}
-      {on && (
-        <video ref={attach} className="camera-preview" muted playsInline autoPlay
-               aria-label="Your camera preview (stays on this device)" />
-      )}
-      <p className="camera-status" role="status" aria-live="polite">
-        {STATUS[state]}
-        {state === "active" && <> · Expression: <strong>{label}</strong></>}
-      </p>
-      {message && <p className="notice">{message}</p>}
-      <div className="actions">
-        {on ? (
-          <button type="button" onClick={disable}>Disable camera</button>
-        ) : (
-          <button type="button" onClick={() => enable()}>
-            {state === "unavailable" ? "Try the camera again" : "Enable camera"}
-          </button>
+      <div className="camera-row">
+        {on && (
+          <div className="camera-frame" data-live={state === "active"}>
+            <video ref={attach} className="camera-preview" muted playsInline autoPlay
+                   aria-label="Your camera preview (stays on this device)" />
+            {state === "active" && <span className="camera-live">● Live</span>}
+          </div>
         )}
+        <div className="camera-info">
+          <p className="camera-status" role="status" aria-live="polite">
+            {STATUS[state]}
+            {state === "active" && <> · Expression: <strong>{label}</strong></>}
+          </p>
+          {state === "active" && breakdown.length > 0 && (
+            <ul className="look-bars" aria-label="What the last few samples looked like">
+              {breakdown.map(({ look, percent }) => (
+                <li key={look}>
+                  <span className="look-name">{look}</span>
+                  <span className="look-track" aria-hidden="true">
+                    <span className="look-fill" style={{ width: `${percent}%` }} />
+                  </span>
+                  <span className="look-pct">{percent}%</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {message && <p className="notice">{message}</p>}
+          <div className="actions">
+            {on ? (
+              <button type="button" onClick={disable}>Disable camera</button>
+            ) : (
+              <button type="button" onClick={() => enable()}>
+                {state === "unavailable" ? "Try the camera again" : "Enable camera"}
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </section>
   );

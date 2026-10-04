@@ -7,6 +7,7 @@ import {
   cameraErrorText,
   classify,
   emptyCounts,
+  liveBreakdown,
   liveLabel,
   nextPace,
   toObservation,
@@ -52,4 +53,15 @@ test("camera errors: denied or missing is 'without analysis', anything else 'una
   assert.equal(cameraErrorText("NotFoundError").denied, true);
   assert.equal(cameraErrorText("AbortError").denied, false);
   assert.match(cameraErrorText("AbortError").text, /interview will continue normally/);
+});
+
+test("liveBreakdown: shares of the analysed samples, largest first, no-face ignored", () => {
+  assert.deepEqual(liveBreakdown([]), []);
+  assert.deepEqual(liveBreakdown(["no_face", "multiple_faces"]), []);
+  assert.deepEqual(liveBreakdown(["neutral", "neutral", "happy", "no_face"]), [
+    { look: "neutral", percent: 67 },
+    { look: "smiling", percent: 33 },
+  ]);
+  // two classes that read the same ("angry", "disgusted" -> frowning) are one look
+  assert.deepEqual(liveBreakdown(["angry", "disgusted"]), [{ look: "frowning", percent: 100 }]);
 });
