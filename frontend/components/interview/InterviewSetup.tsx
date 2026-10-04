@@ -36,6 +36,8 @@ import { exportFileName, planDocument, topicDescription } from "@/lib/exportDoc"
 import ExportButtons from "@/components/interview/ExportButtons";
 import CameraPanel from "@/components/interview/CameraPanel";
 import type { Camera } from "@/components/interview/useExpressionCamera";
+import type { Voice } from "@/components/interview/useVoice";
+import { VoiceSetup } from "@/components/interview/VoicePanel";
 
 type StepProps = { sessionId: string; onStatus: (status: InterviewStatus) => void };
 
@@ -277,10 +279,11 @@ export function PlanForm({ sessionId, onStatus }: StepProps) {
 
 // ---------- READY ----------
 
-export function ReadyScreen({ sessionId, onStatus, candidateName, attempt, camera }: StepProps & {
+export function ReadyScreen({ sessionId, onStatus, candidateName, attempt, camera, voice }: StepProps & {
   candidateName: string;
   attempt?: number;
   camera: Camera;
+  voice: Voice;
 }) {
   const [plan, setPlan] = useState<InterviewPlan | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -348,6 +351,7 @@ export function ReadyScreen({ sessionId, onStatus, candidateName, attempt, camer
         </>
       )}
       <ConsentControl sessionId={sessionId} />
+      <VoiceSetup voice={voice} />
       <CameraPanel camera={camera} intro />
       <p className="hint">{COPY.browserClose}</p>
       {error && <p className="form-error" role="alert">{error}</p>}

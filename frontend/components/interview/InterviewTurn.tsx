@@ -14,6 +14,9 @@ import {
 } from "@/lib/api";
 import CameraPanel from "@/components/interview/CameraPanel";
 import type { Camera } from "@/components/interview/useExpressionCamera";
+import type { Voice } from "@/components/interview/useVoice";
+import { VoiceStage } from "@/components/interview/VoicePanel";
+import { appendTranscript, describeSpeech, speechMetrics } from "@/lib/voice";
 import {
   ANSWER_KIND_LABEL,
   ANSWER_MAX_LENGTH,
@@ -37,6 +40,7 @@ type Props = {
   draft: string;
   setDraft: (text: string) => void;
   camera: Camera;
+  voice: Voice;
 };
 
 const OTHER_KINDS: AnswerKind[] = ["CLARIFY", "DONT_KNOW", "SKIP"];
@@ -53,7 +57,7 @@ function useCountdown(turn: TurnResult | null, fetchedAt: number) {
   return turn.progress.time_remaining_seconds - Math.max(0, now - fetchedAt) / 1000;
 }
 
-export default function InterviewTurn({ sessionId, paused, onStatus, draft, setDraft, camera }: Props) {
+export default function InterviewTurn({ sessionId, paused, onStatus, draft, setDraft, camera, voice }: Props) {
   const [turn, setTurn] = useState<TurnResult | null>(null);
   const [fetchedAt, setFetchedAt] = useState(0); // when the server's time figure arrived
   const [busy, setBusy] = useState(false);
@@ -97,8 +101,43 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
     setPaused(paused);
   }, [questionId, paused, setQuestion, setPaused]);
 
+  // Voice mode: a new question is read aloud (and, if chosen, the microphone opens after it).
+  // Spoken words only ever land in the answer box, to be reviewed and edited before sending.
+  const draftRef = useRef(draft);
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+  const questionText = turn?.question?.text ?? null;
+  const questionTextRef = useRef(questionText);
+  useEffect(() => {
+    questionTextRef.current = questionText;
+  }, [questionText]);
+  const { enabled: voiceOn, autoRead, autoListen, canSpeak, canListen } = voice;
+  const { speak, startListening, silence, resetMetrics } = voice;
+  const listenInto = useCallback(() => {
+    startListening((heard) => setDraft(appendTranscript(draftRef.current, heard)));
+  }, [startListening, setDraft]);
+  useEffect(() => {
+    if (!questionId) return;
+    resetMetrics();
+    const text = questionTextRef.current;
+    if (!voiceOn || !text) return;
+    if (autoRead && canSpeak) {
+      speak(text, autoListen && canListen ? listenInto : undefined);
+    } else if (autoListen && canListen) {
+      listenInto();
+    }
+    return () => silence();
+    // Only a new question (or turning voice on/off) restarts this; preference changes mid-question don't.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questionId, voiceOn]);
+  useEffect(() => {
+    if (paused) silence(); // a paused interview is silent and the microphone is off
+  }, [paused, silence]);
+
   async function send(kind: AnswerKind) {
     if (!turn?.question) return;
+    silence();
     setBusy(true);
     setError(null);
     try {
@@ -217,6 +256,8 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
               <p className="hint">{RULES_REASON_TEXT[q.rules_reason]}</p>
             )}
           </div>
+          <VoiceStage voice={voice} questionText={q.text} disabled={busy || blocked || !waiting}
+                      onListen={listenInto} />
           <div className="field">
             <label htmlFor="answer">Your answer</label>
             <textarea
@@ -226,7 +267,14 @@ export default function InterviewTurn({ sessionId, paused, onStatus, draft, setD
               onChange={(e) => setDraft(e.target.value)}
               disabled={blocked}
               aria-describedby="answer-count"
+              placeholder={voice.enabled && voice.canListen ? "Press “Start speaking”, or type here. Your words appear here for you to edit." : undefined}
             />
+            {voice.interim && <span className="hint voice-interim" aria-live="off">{voice.interim}…</span>}
+            {voice.listenedMs > 0 && !voice.listening && (
+              <span className="hint voice-metrics">
+                {describeSpeech(speechMetrics(draft, voice.listenedMs))}
+              </span>
+            )}
             <span id="answer-count" className={length >= ANSWER_WARN_AT ? "field-error" : "hint"}>
               {length.toLocaleString()} / {ANSWER_MAX_LENGTH.toLocaleString()} characters
               {length >= ANSWER_WARN_AT && ` — ${COPY.lengthWarning}`}
