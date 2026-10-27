@@ -24,7 +24,41 @@ MAX_TOPICS = 45 // MINUTES_PER_TOPIC
 
 
 class TargetRole(StrEnum):
-    SOFTWARE_DEVELOPER_INTERN = "SOFTWARE_DEVELOPER_INTERN"  # the PRD §8 example, the only one defined
+    # Software Development
+    SOFTWARE_ENGINEER = "SOFTWARE_ENGINEER"
+    SOFTWARE_DEVELOPER_INTERN = "SOFTWARE_DEVELOPER_INTERN"
+    FRONTEND_DEVELOPER = "FRONTEND_DEVELOPER"
+    BACKEND_DEVELOPER = "BACKEND_DEVELOPER"
+    FULL_STACK_DEVELOPER = "FULL_STACK_DEVELOPER"
+    PYTHON_DEVELOPER = "PYTHON_DEVELOPER"
+    JAVA_DEVELOPER = "JAVA_DEVELOPER"
+    ANDROID_DEVELOPER = "ANDROID_DEVELOPER"
+    # AI and Data
+    AI_ML_ENGINEER = "AI_ML_ENGINEER"
+    GENERATIVE_AI_ENGINEER = "GENERATIVE_AI_ENGINEER"
+    DATA_ANALYST = "DATA_ANALYST"
+    DATA_SCIENTIST = "DATA_SCIENTIST"
+    DATA_ENGINEER = "DATA_ENGINEER"
+    # Cybersecurity
+    CYBERSECURITY_ANALYST = "CYBERSECURITY_ANALYST"
+    SOC_ANALYST = "SOC_ANALYST"
+    PENETRATION_TESTER = "PENETRATION_TESTER"
+    SECURITY_ENGINEER = "SECURITY_ENGINEER"
+    # Cloud and DevOps
+    CLOUD_ENGINEER = "CLOUD_ENGINEER"
+    DEVOPS_ENGINEER = "DEVOPS_ENGINEER"
+    SITE_RELIABILITY_ENGINEER = "SITE_RELIABILITY_ENGINEER"
+    # Other Technical Roles
+    QA_TEST_ENGINEER = "QA_TEST_ENGINEER"
+    AUTOMATION_TEST_ENGINEER = "AUTOMATION_TEST_ENGINEER"
+    DATABASE_ADMINISTRATOR = "DATABASE_ADMINISTRATOR"
+    NETWORK_ENGINEER = "NETWORK_ENGINEER"
+    MOBILE_APP_DEVELOPER = "MOBILE_APP_DEVELOPER"
+    # General and Professional
+    HR_BEHAVIORAL = "HR_BEHAVIORAL"
+    BUSINESS_ANALYST = "BUSINESS_ANALYST"
+    PRODUCT_MANAGER = "PRODUCT_MANAGER"
+    TECHNICAL_SUPPORT_ENGINEER = "TECHNICAL_SUPPORT_ENGINEER"
 
 
 class ExperienceLevel(StrEnum):
@@ -50,8 +84,7 @@ class Difficulty(StrEnum):
 
 
 class Competency(StrEnum):
-    # PRD §8 "Software Developer Intern" competencies, plus HR from §42 Mixed Placement.
-    # Lower-case values as in the PRD's own JSON (§9: "competency": "project_understanding").
+    # Original competencies (Software Developer Intern).
     PROGRAMMING_FUNDAMENTALS = "programming_fundamentals"
     DATA_STRUCTURES = "data_structures"
     DATABASE = "database"
@@ -59,6 +92,25 @@ class Competency(StrEnum):
     PROJECT_UNDERSTANDING = "project_understanding"
     BEHAVIORAL = "behavioral"
     HR = "hr"
+    # Role-specific competencies.
+    API_DESIGN = "api_design"
+    SYSTEM_DESIGN = "system_design"
+    TESTING_QA = "testing_qa"
+    PYTHON_LANGUAGE = "python_language"
+    JAVA_LANGUAGE = "java_language"
+    MOBILE_DEVELOPMENT = "mobile_development"
+    ML_FUNDAMENTALS = "ml_fundamentals"
+    DATA_ANALYSIS = "data_analysis"
+    DATA_ENGINEERING = "data_engineering"
+    SECURITY_FUNDAMENTALS = "security_fundamentals"
+    NETWORK_SECURITY = "network_security"
+    CLOUD_INFRASTRUCTURE = "cloud_infrastructure"
+    DEVOPS_PRACTICES = "devops_practices"
+    NETWORKING = "networking"
+    BUSINESS_ANALYSIS = "business_analysis"
+    PRODUCT_MANAGEMENT = "product_management"
+    TECHNICAL_SUPPORT = "technical_support"
+    PROFESSIONAL_SKILLS = "professional_skills"
 
 
 class QuestionType(StrEnum):
@@ -92,7 +144,7 @@ FactRef = Annotated[str, StringConstraints(pattern=r"^F[1-9][0-9]{0,3}$")]
 class PlanSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    target_role: TargetRole
+    target_role: TargetRole = TargetRole.SOFTWARE_DEVELOPER_INTERN
     experience_level: ExperienceLevel
     mode: InterviewMode
     difficulty: Difficulty

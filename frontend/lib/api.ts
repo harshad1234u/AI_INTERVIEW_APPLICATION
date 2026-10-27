@@ -264,7 +264,42 @@ export type InterviewSession = {
   plan_source: Source | null;
 };
 
-export type TargetRole = "SOFTWARE_DEVELOPER_INTERN";
+export type TargetRole =
+  // Software Development
+  | "SOFTWARE_ENGINEER"
+  | "SOFTWARE_DEVELOPER_INTERN"
+  | "FRONTEND_DEVELOPER"
+  | "BACKEND_DEVELOPER"
+  | "FULL_STACK_DEVELOPER"
+  | "PYTHON_DEVELOPER"
+  | "JAVA_DEVELOPER"
+  | "ANDROID_DEVELOPER"
+  // AI and Data
+  | "AI_ML_ENGINEER"
+  | "GENERATIVE_AI_ENGINEER"
+  | "DATA_ANALYST"
+  | "DATA_SCIENTIST"
+  | "DATA_ENGINEER"
+  // Cybersecurity
+  | "CYBERSECURITY_ANALYST"
+  | "SOC_ANALYST"
+  | "PENETRATION_TESTER"
+  | "SECURITY_ENGINEER"
+  // Cloud and DevOps
+  | "CLOUD_ENGINEER"
+  | "DEVOPS_ENGINEER"
+  | "SITE_RELIABILITY_ENGINEER"
+  // Other Technical Roles
+  | "QA_TEST_ENGINEER"
+  | "AUTOMATION_TEST_ENGINEER"
+  | "DATABASE_ADMINISTRATOR"
+  | "NETWORK_ENGINEER"
+  | "MOBILE_APP_DEVELOPER"
+  // General and Professional
+  | "HR_BEHAVIORAL"
+  | "BUSINESS_ANALYST"
+  | "PRODUCT_MANAGER"
+  | "TECHNICAL_SUPPORT_ENGINEER";
 export type ExperienceLevel = "STUDENT" | "FRESH_GRADUATE" | "ENTRY_LEVEL" | "INTERNSHIP_APPLICANT";
 export type InterviewMode = "TECHNICAL" | "BEHAVIORAL" | "PROJECT_DEEP_DIVE" | "MIXED";
 export type Difficulty = "EASY" | "MEDIUM" | "HARD";
@@ -276,7 +311,25 @@ export type Competency =
   | "web_development"
   | "project_understanding"
   | "behavioral"
-  | "hr";
+  | "hr"
+  | "api_design"
+  | "system_design"
+  | "testing_qa"
+  | "python_language"
+  | "java_language"
+  | "mobile_development"
+  | "ml_fundamentals"
+  | "data_analysis"
+  | "data_engineering"
+  | "security_fundamentals"
+  | "network_security"
+  | "cloud_infrastructure"
+  | "devops_practices"
+  | "networking"
+  | "business_analysis"
+  | "product_management"
+  | "technical_support"
+  | "professional_skills";
 export type QuestionType = "TECHNICAL" | "PROJECT" | "BEHAVIORAL" | "HR";
 export type Source = "AI" | "RULES";
 

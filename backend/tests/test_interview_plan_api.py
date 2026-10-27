@@ -524,3 +524,73 @@ def test_concurrent_plans_persist_exactly_once_without_holding_locks(
         calls = list(db.scalars(select(ProviderCall.id).where(ProviderCall.model == "gated-model")))
     assert status == S.READY and stored["source"] == "AI"
     assert len(calls) == 2 and call_id in calls  # both calls recorded: not exactly-once execution
+
+
+# ---------- selectable interview roles (Phase 1) ----------
+
+
+@pytest.mark.parametrize("target_role", [
+    "CYBERSECURITY_ANALYST",
+    "DATA_SCIENTIST",
+    "DEVOPS_ENGINEER",
+    "PYTHON_DEVELOPER",
+    "HR_BEHAVIORAL",
+    "SOFTWARE_ENGINEER",
+])
+def test_valid_role_is_accepted_and_preserved(
+    client: TestClient, sid: str, db_session: Session, target_role: str
+) -> None:
+    res = plan(client, sid, target_role=target_role)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "READY"
+    assert body["plan"]["settings"]["target_role"] == target_role
+    status, stored, _ = session_row(db_session, sid)
+    assert status == "READY"
+    assert stored["settings"]["target_role"] == target_role
+
+
+def test_legacy_client_omitting_target_role_defaults_to_intern(
+    client: TestClient, sid: str, db_session: Session
+) -> None:
+    settings_without_role = {k: v for k, v in SETTINGS.items() if k != "target_role"}
+    res = client.post(f"/api/interview-sessions/{sid}/plan", json=settings_without_role)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "READY"
+    assert body["plan"]["settings"]["target_role"] == "SOFTWARE_DEVELOPER_INTERN"
+
+
+def test_invalid_role_is_rejected_with_422(
+    client: TestClient, sid: str, db_session: Session
+) -> None:
+    res = plan(client, sid, target_role="ASTRONAUT_CAPTAIN")
+    assert res.status_code == 422
+    assert session_row(db_session, sid)[:2] == ("INTERVIEW_PLANNING", None)
+
+
+def test_ai_planning_receives_selected_role(
+    client: TestClient, sid: str, db_session: Session, use_gateway
+) -> None:
+    sec_valid = {"topics": [
+        {"competency": "security_fundamentals", "topic": "Threat modeling", "fact_refs": [],
+         "question_templates": ["How do you approach threat modeling?"],
+         "expected_concepts": ["STRIDE", "assets"]},
+        {"competency": "project_understanding", "topic": "TrustLens architecture", "fact_refs": ["F1"],
+         "question_templates": ["Explain the architecture of TrustLens."], "expected_concepts": []},
+        {"competency": "behavioral", "topic": "Teamwork", "fact_refs": [],
+         "question_templates": ["Describe a time you worked in a team."], "expected_concepts": []},
+        {"competency": "hr", "topic": "Motivation", "fact_refs": [],
+         "question_templates": ["Why this role?"], "expected_concepts": []},
+    ]}
+    provider = FakeProvider("groq", sec_valid)
+    use_gateway(make_gateway(provider))
+    res = plan(client, consented(client, sid), target_role="CYBERSECURITY_ANALYST")
+    assert res.status_code == 200
+    [request] = provider.calls
+    assert "Cybersecurity Analyst" in request.system_instruction
+    assert "security_fundamentals" in request.system_instruction
+    assert res.json()["plan"]["settings"]["target_role"] == "CYBERSECURITY_ANALYST"
+    assert res.json()["plan"]["source"] == "AI"
+
+

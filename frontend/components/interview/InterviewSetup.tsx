@@ -12,6 +12,7 @@ import {
   type InterviewPlan,
   type InterviewStatus,
   type PlanSettings,
+  type TargetRole,
   actOnSession,
   getConsent,
   getInterviewPlan,
@@ -176,6 +177,7 @@ export function ConsentControl({ sessionId, note }: { sessionId: string; note?: 
 
 // ---------- INTERVIEW_PLANNING ----------
 
+const ROLES = Object.keys(ROLE_LABEL) as TargetRole[];
 const LEVELS = Object.keys(LEVEL_LABEL) as ExperienceLevel[];
 const MODES = Object.keys(MODE_LABEL) as InterviewMode[];
 const DIFFICULTIES = Object.keys(DIFFICULTY_LABEL) as Difficulty[];
@@ -248,9 +250,7 @@ export function PlanForm({ sessionId, onStatus }: StepProps) {
   return (
     <form onSubmit={submit}>
       <h2 tabIndex={-1} data-screen-heading>Plan your interview</h2>
-      <p>
-        <span className="hint">Role:</span> {ROLE_LABEL[settings.target_role]}
-      </p>
+      {select("target_role", "Job role", ROLES, (v) => ROLE_LABEL[v])}
       {select("experience_level", "Experience level", LEVELS, (v) => LEVEL_LABEL[v])}
       {select("mode", "Interview type", MODES, (v) => MODE_LABEL[v])}
       {select("difficulty", "Difficulty", DIFFICULTIES, (v) => DIFFICULTY_LABEL[v])}

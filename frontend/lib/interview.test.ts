@@ -14,6 +14,7 @@ import {
   MODE_LABEL,
   QUESTION_KIND_LABEL,
   QUESTION_TYPE_LABEL,
+  ROLE_LABEL,
   SCREEN,
   RULES_REASON_TEXT,
   attemptNumbers,
@@ -144,7 +145,7 @@ test("fixed UI wording makes no judgment about the candidate", () => {
     ...Object.values(CRITERION_LABEL), ...Object.values(DIFFICULTY_LABEL),
     ...Object.values(EVALUATION_STATUS_LABEL), ...Object.values(FINISH_LABEL),
     ...Object.values(LEVEL_LABEL), ...Object.values(MODE_LABEL), ...Object.values(QUESTION_KIND_LABEL),
-    ...Object.values(QUESTION_TYPE_LABEL),
+    ...Object.values(QUESTION_TYPE_LABEL), ...Object.values(ROLE_LABEL),
   ];
   for (const text of texts) {
     for (const pattern of FORBIDDEN) assert.doesNotMatch(text, pattern, text);
@@ -152,6 +153,20 @@ test("fixed UI wording makes no judgment about the candidate", () => {
   const [before, denial] = COPY.cameraExplain.split("It is not a measurement of ");
   for (const pattern of FORBIDDEN) assert.doesNotMatch(before, pattern, before);
   assert.match(denial, /^emotion, confidence or honesty and never affects your feedback\./);
+});
+
+test("every interview role has a human-readable display label", () => {
+  assert.equal(typeof ROLE_LABEL.SOFTWARE_DEVELOPER_INTERN, "string");
+  assert.equal(ROLE_LABEL.SOFTWARE_DEVELOPER_INTERN, "Software Developer Intern");
+  assert.equal(ROLE_LABEL.CYBERSECURITY_ANALYST, "Cybersecurity Analyst");
+  assert.equal(ROLE_LABEL.AI_ML_ENGINEER, "AI/ML Engineer");
+  assert.equal(ROLE_LABEL.CLOUD_ENGINEER, "Cloud Engineer");
+  assert.equal(ROLE_LABEL.HR_BEHAVIORAL, "HR / Behavioral Interview");
+  // 29 total roles defined across all 6 categories
+  assert.equal(Object.keys(ROLE_LABEL).length, 29);
+  for (const [role, label] of Object.entries(ROLE_LABEL)) {
+    assert.ok(label.length > 0, `Missing label for role ${role}`);
+  }
 });
 
 test("every rules reason has an explanation for the candidate", () => {

@@ -26,6 +26,7 @@ from app.services.interview_planner import (
     FOCUS,
     GROUP,
     HR_TOPIC,
+    LABELS,
     MODE_GROUPS,
     PROJECT_QUESTIONS,
     TECHNICAL_QUESTIONS,
@@ -236,9 +237,7 @@ def test_no_two_fallback_questions_are_duplicates(project: str) -> None:
     for (a, x), (b, y) in itertools.combinations(texts.items(), 2):
         assert not is_duplicate(x, y), (a, b)
     # A framed rephrase of one topic's question never hides another topic's question either.
-    titles = {c.value: label for c, label in
-              zip(TECHNICAL_QUESTIONS, ("Programming Fundamentals", "Data Structures", "Database",
-                                        "Web Development"))}
+    titles = {c.value: LABELS[c] for c in TECHNICAL_QUESTIONS}
     for (a, x), (b, y) in itertools.permutations(texts.items(), 2):
         framed = REPHRASE_TEMPLATE.format(topic=titles.get(a, a), question=x)
         assert not is_duplicate(y, framed), (a, b)

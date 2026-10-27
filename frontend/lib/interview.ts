@@ -15,6 +15,7 @@ import type {
   QuestionType,
   QuestionView,
   RulesReason,
+  TargetRole,
 } from "./api";
 
 /** Which screen shows a session. Chosen from the server's status only. */
@@ -93,7 +94,37 @@ export function seqById(questions: { question_id: string; seq: number }[]): Map<
 
 // ---------- labels (display text for server values) ----------
 
-export const ROLE_LABEL = { SOFTWARE_DEVELOPER_INTERN: "Software Developer Intern" } as const;
+export const ROLE_LABEL: Record<TargetRole, string> = {
+  SOFTWARE_ENGINEER: "Software Engineer",
+  SOFTWARE_DEVELOPER_INTERN: "Software Developer Intern",
+  FRONTEND_DEVELOPER: "Frontend Developer",
+  BACKEND_DEVELOPER: "Backend Developer",
+  FULL_STACK_DEVELOPER: "Full-Stack Developer",
+  PYTHON_DEVELOPER: "Python Developer",
+  JAVA_DEVELOPER: "Java Developer",
+  ANDROID_DEVELOPER: "Android Developer",
+  AI_ML_ENGINEER: "AI/ML Engineer",
+  GENERATIVE_AI_ENGINEER: "Generative AI Engineer",
+  DATA_ANALYST: "Data Analyst",
+  DATA_SCIENTIST: "Data Scientist",
+  DATA_ENGINEER: "Data Engineer",
+  CYBERSECURITY_ANALYST: "Cybersecurity Analyst",
+  SOC_ANALYST: "SOC Analyst",
+  PENETRATION_TESTER: "Penetration Tester",
+  SECURITY_ENGINEER: "Security Engineer",
+  CLOUD_ENGINEER: "Cloud Engineer",
+  DEVOPS_ENGINEER: "DevOps Engineer",
+  SITE_RELIABILITY_ENGINEER: "Site Reliability Engineer",
+  QA_TEST_ENGINEER: "QA / Test Engineer",
+  AUTOMATION_TEST_ENGINEER: "Automation Test Engineer",
+  DATABASE_ADMINISTRATOR: "Database Administrator",
+  NETWORK_ENGINEER: "Network Engineer",
+  MOBILE_APP_DEVELOPER: "Mobile App Developer",
+  HR_BEHAVIORAL: "HR / Behavioral Interview",
+  BUSINESS_ANALYST: "Business Analyst",
+  PRODUCT_MANAGER: "Product Manager",
+  TECHNICAL_SUPPORT_ENGINEER: "Technical Support Engineer",
+};
 
 export const LEVEL_LABEL: Record<ExperienceLevel, string> = {
   STUDENT: "Student",
@@ -124,6 +155,24 @@ export const COMPETENCY_LABEL: Record<Competency, string> = {
   project_understanding: "Project Understanding",
   behavioral: "Behavioral",
   hr: "HR",
+  api_design: "API Design",
+  system_design: "System Design",
+  testing_qa: "Testing & QA",
+  python_language: "Python",
+  java_language: "Java",
+  mobile_development: "Mobile Development",
+  ml_fundamentals: "ML Fundamentals",
+  data_analysis: "Data Analysis",
+  data_engineering: "Data Engineering",
+  security_fundamentals: "Security Fundamentals",
+  network_security: "Network Security",
+  cloud_infrastructure: "Cloud Infrastructure",
+  devops_practices: "DevOps Practices",
+  networking: "Networking",
+  business_analysis: "Business Analysis",
+  product_management: "Product Management",
+  technical_support: "Technical Support",
+  professional_skills: "Professional Skills",
 };
 
 export const QUESTION_TYPE_LABEL: Record<QuestionType, string> = {

@@ -58,18 +58,125 @@ C, Q, M = Competency, QuestionType, InterviewMode
 
 # ---------- catalog: the PRD §26 planner "tools", as data ----------
 
-ROLE_LABELS = {TargetRole.SOFTWARE_DEVELOPER_INTERN: "Software Developer Intern"}
-# get_role_template() / get_competencies(): PRD §8's competencies for the role, plus HR (§42 Mixed).
-ROLE_COMPETENCIES = {TargetRole.SOFTWARE_DEVELOPER_INTERN: tuple(C)}
+R = TargetRole
+ROLE_LABELS = {
+    R.SOFTWARE_ENGINEER: "Software Engineer",
+    R.SOFTWARE_DEVELOPER_INTERN: "Software Developer Intern",
+    R.FRONTEND_DEVELOPER: "Frontend Developer",
+    R.BACKEND_DEVELOPER: "Backend Developer",
+    R.FULL_STACK_DEVELOPER: "Full-Stack Developer",
+    R.PYTHON_DEVELOPER: "Python Developer",
+    R.JAVA_DEVELOPER: "Java Developer",
+    R.ANDROID_DEVELOPER: "Android Developer",
+    R.AI_ML_ENGINEER: "AI/ML Engineer",
+    R.GENERATIVE_AI_ENGINEER: "Generative AI Engineer",
+    R.DATA_ANALYST: "Data Analyst",
+    R.DATA_SCIENTIST: "Data Scientist",
+    R.DATA_ENGINEER: "Data Engineer",
+    R.CYBERSECURITY_ANALYST: "Cybersecurity Analyst",
+    R.SOC_ANALYST: "SOC Analyst",
+    R.PENETRATION_TESTER: "Penetration Tester",
+    R.SECURITY_ENGINEER: "Security Engineer",
+    R.CLOUD_ENGINEER: "Cloud Engineer",
+    R.DEVOPS_ENGINEER: "DevOps Engineer",
+    R.SITE_RELIABILITY_ENGINEER: "Site Reliability Engineer",
+    R.QA_TEST_ENGINEER: "QA / Test Engineer",
+    R.AUTOMATION_TEST_ENGINEER: "Automation Test Engineer",
+    R.DATABASE_ADMINISTRATOR: "Database Administrator",
+    R.NETWORK_ENGINEER: "Network Engineer",
+    R.MOBILE_APP_DEVELOPER: "Mobile App Developer",
+    R.HR_BEHAVIORAL: "HR / Behavioral Interview",
+    R.BUSINESS_ANALYST: "Business Analyst",
+    R.PRODUCT_MANAGER: "Product Manager",
+    R.TECHNICAL_SUPPORT_ENGINEER: "Technical Support Engineer",
+}
+
+# Each role's competencies used by the planner. PROJECT_UNDERSTANDING, BEHAVIORAL and HR are
+# included for every role so that MIXED mode always has all four groups. The first competencies
+# listed are the role-specific technical ones; the shared ones follow.
+_CORE = (C.PROJECT_UNDERSTANDING, C.BEHAVIORAL, C.HR)
+
+ROLE_COMPETENCIES: dict[TargetRole, tuple[Competency, ...]] = {
+    # Software Development
+    R.SOFTWARE_ENGINEER: (C.PROGRAMMING_FUNDAMENTALS, C.DATA_STRUCTURES, C.DATABASE,
+                          C.WEB_DEVELOPMENT, C.SYSTEM_DESIGN, *_CORE),
+    R.SOFTWARE_DEVELOPER_INTERN: (C.PROGRAMMING_FUNDAMENTALS, C.DATA_STRUCTURES, C.DATABASE,
+                                  C.WEB_DEVELOPMENT, *_CORE),
+    R.FRONTEND_DEVELOPER: (C.WEB_DEVELOPMENT, C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.BACKEND_DEVELOPER: (C.API_DESIGN, C.DATABASE, C.PROGRAMMING_FUNDAMENTALS,
+                          C.SYSTEM_DESIGN, *_CORE),
+    R.FULL_STACK_DEVELOPER: (C.WEB_DEVELOPMENT, C.API_DESIGN, C.DATABASE,
+                             C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.PYTHON_DEVELOPER: (C.PYTHON_LANGUAGE, C.DATA_STRUCTURES, C.DATABASE,
+                         C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.JAVA_DEVELOPER: (C.JAVA_LANGUAGE, C.DATA_STRUCTURES, C.DATABASE,
+                       C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.ANDROID_DEVELOPER: (C.MOBILE_DEVELOPMENT, C.PROGRAMMING_FUNDAMENTALS, C.DATABASE, *_CORE),
+    # AI and Data
+    R.AI_ML_ENGINEER: (C.ML_FUNDAMENTALS, C.PYTHON_LANGUAGE, C.DATA_STRUCTURES,
+                       C.SYSTEM_DESIGN, *_CORE),
+    R.GENERATIVE_AI_ENGINEER: (C.ML_FUNDAMENTALS, C.PYTHON_LANGUAGE, C.SYSTEM_DESIGN,
+                               C.API_DESIGN, *_CORE),
+    R.DATA_ANALYST: (C.DATA_ANALYSIS, C.DATABASE, C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.DATA_SCIENTIST: (C.ML_FUNDAMENTALS, C.DATA_ANALYSIS, C.PYTHON_LANGUAGE, *_CORE),
+    R.DATA_ENGINEER: (C.DATA_ENGINEERING, C.DATABASE, C.PROGRAMMING_FUNDAMENTALS,
+                      C.SYSTEM_DESIGN, *_CORE),
+    # Cybersecurity
+    R.CYBERSECURITY_ANALYST: (C.SECURITY_FUNDAMENTALS, C.NETWORK_SECURITY,
+                              C.NETWORKING, *_CORE),
+    R.SOC_ANALYST: (C.SECURITY_FUNDAMENTALS, C.NETWORK_SECURITY, C.NETWORKING, *_CORE),
+    R.PENETRATION_TESTER: (C.SECURITY_FUNDAMENTALS, C.NETWORK_SECURITY,
+                           C.NETWORKING, C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.SECURITY_ENGINEER: (C.SECURITY_FUNDAMENTALS, C.NETWORK_SECURITY,
+                          C.SYSTEM_DESIGN, C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    # Cloud and DevOps
+    R.CLOUD_ENGINEER: (C.CLOUD_INFRASTRUCTURE, C.NETWORKING, C.SYSTEM_DESIGN, *_CORE),
+    R.DEVOPS_ENGINEER: (C.DEVOPS_PRACTICES, C.CLOUD_INFRASTRUCTURE, C.SYSTEM_DESIGN, *_CORE),
+    R.SITE_RELIABILITY_ENGINEER: (C.DEVOPS_PRACTICES, C.CLOUD_INFRASTRUCTURE,
+                                  C.SYSTEM_DESIGN, C.NETWORKING, *_CORE),
+    # Other Technical Roles
+    R.QA_TEST_ENGINEER: (C.TESTING_QA, C.PROGRAMMING_FUNDAMENTALS, C.DATABASE, *_CORE),
+    R.AUTOMATION_TEST_ENGINEER: (C.TESTING_QA, C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.DATABASE_ADMINISTRATOR: (C.DATABASE, C.SYSTEM_DESIGN, C.PROGRAMMING_FUNDAMENTALS, *_CORE),
+    R.NETWORK_ENGINEER: (C.NETWORKING, C.SECURITY_FUNDAMENTALS, C.SYSTEM_DESIGN, *_CORE),
+    R.MOBILE_APP_DEVELOPER: (C.MOBILE_DEVELOPMENT, C.PROGRAMMING_FUNDAMENTALS,
+                             C.DATABASE, *_CORE),
+    # General and Professional
+    R.HR_BEHAVIORAL: (C.PROFESSIONAL_SKILLS, *_CORE),
+    R.BUSINESS_ANALYST: (C.BUSINESS_ANALYSIS, C.DATABASE, C.DATA_ANALYSIS, *_CORE),
+    R.PRODUCT_MANAGER: (C.PRODUCT_MANAGEMENT, C.SYSTEM_DESIGN, C.BUSINESS_ANALYSIS, *_CORE),
+    R.TECHNICAL_SUPPORT_ENGINEER: (C.TECHNICAL_SUPPORT, C.NETWORKING,
+                                   C.DATABASE, *_CORE),
+}
+
 GROUP = {
     C.PROGRAMMING_FUNDAMENTALS: Q.TECHNICAL, C.DATA_STRUCTURES: Q.TECHNICAL, C.DATABASE: Q.TECHNICAL,
     C.WEB_DEVELOPMENT: Q.TECHNICAL, C.PROJECT_UNDERSTANDING: Q.PROJECT, C.BEHAVIORAL: Q.BEHAVIORAL,
     C.HR: Q.HR,
+    # New competencies all map to the TECHNICAL group.
+    C.API_DESIGN: Q.TECHNICAL, C.SYSTEM_DESIGN: Q.TECHNICAL, C.TESTING_QA: Q.TECHNICAL,
+    C.PYTHON_LANGUAGE: Q.TECHNICAL, C.JAVA_LANGUAGE: Q.TECHNICAL,
+    C.MOBILE_DEVELOPMENT: Q.TECHNICAL, C.ML_FUNDAMENTALS: Q.TECHNICAL,
+    C.DATA_ANALYSIS: Q.TECHNICAL, C.DATA_ENGINEERING: Q.TECHNICAL,
+    C.SECURITY_FUNDAMENTALS: Q.TECHNICAL, C.NETWORK_SECURITY: Q.TECHNICAL,
+    C.CLOUD_INFRASTRUCTURE: Q.TECHNICAL, C.DEVOPS_PRACTICES: Q.TECHNICAL,
+    C.NETWORKING: Q.TECHNICAL, C.BUSINESS_ANALYSIS: Q.TECHNICAL,
+    C.PRODUCT_MANAGEMENT: Q.TECHNICAL, C.TECHNICAL_SUPPORT: Q.TECHNICAL,
+    C.PROFESSIONAL_SKILLS: Q.TECHNICAL,
 }
 LABELS = {
     C.PROGRAMMING_FUNDAMENTALS: "Programming Fundamentals", C.DATA_STRUCTURES: "Data Structures",
     C.DATABASE: "Database", C.WEB_DEVELOPMENT: "Web Development",
     C.PROJECT_UNDERSTANDING: "Project Understanding", C.BEHAVIORAL: "Behavioral", C.HR: "HR",
+    C.API_DESIGN: "API Design", C.SYSTEM_DESIGN: "System Design", C.TESTING_QA: "Testing & QA",
+    C.PYTHON_LANGUAGE: "Python", C.JAVA_LANGUAGE: "Java",
+    C.MOBILE_DEVELOPMENT: "Mobile Development", C.ML_FUNDAMENTALS: "ML Fundamentals",
+    C.DATA_ANALYSIS: "Data Analysis", C.DATA_ENGINEERING: "Data Engineering",
+    C.SECURITY_FUNDAMENTALS: "Security Fundamentals", C.NETWORK_SECURITY: "Network Security",
+    C.CLOUD_INFRASTRUCTURE: "Cloud Infrastructure", C.DEVOPS_PRACTICES: "DevOps Practices",
+    C.NETWORKING: "Networking", C.BUSINESS_ANALYSIS: "Business Analysis",
+    C.PRODUCT_MANAGEMENT: "Product Management", C.TECHNICAL_SUPPORT: "Technical Support",
+    C.PROFESSIONAL_SKILLS: "Professional Skills",
 }
 # PRD §42: the groups each mode is made of, in interview order.
 MODE_GROUPS = {
@@ -106,6 +213,42 @@ TECHNICAL_QUESTIONS = {
                 "them?",
     C.WEB_DEVELOPMENT: "What happens between typing a web address into a browser and the page "
                        "appearing on screen?",
+    C.API_DESIGN: "What makes a REST API well-designed, and how would you handle errors "
+                  "in responses?",
+    C.SYSTEM_DESIGN: "How would you design a URL shortening service, and what trade-offs "
+                     "would you consider?",
+    C.TESTING_QA: "What is the difference between unit tests and integration tests, and when "
+                  "would you use each?",
+    C.PYTHON_LANGUAGE: "How do Python generators work, and when would you choose one over "
+                       "a list comprehension?",
+    C.JAVA_LANGUAGE: "What is the difference between an abstract class and an interface in "
+                     "Java, and when would you use each?",
+    C.MOBILE_DEVELOPMENT: "What are the key differences between native and cross-platform "
+                          "mobile development approaches?",
+    C.ML_FUNDAMENTALS: "What is overfitting in machine learning, and what techniques help "
+                       "prevent it?",
+    C.DATA_ANALYSIS: "Walk through how you would clean and prepare a messy dataset for "
+                     "analysis.",
+    C.DATA_ENGINEERING: "What is the difference between a data lake and a data warehouse, "
+                        "and when would you use each?",
+    C.SECURITY_FUNDAMENTALS: "What is the CIA triad in information security, and how does "
+                             "each part apply to a web application?",
+    C.NETWORK_SECURITY: "How does a firewall protect a network, and what is the difference "
+                        "between stateful and stateless inspection?",
+    C.CLOUD_INFRASTRUCTURE: "What are the key differences between IaaS, PaaS and SaaS, "
+                            "and when would you choose each?",
+    C.DEVOPS_PRACTICES: "What is a CI/CD pipeline, and what are the benefits of automating "
+                        "the build and deployment process?",
+    C.NETWORKING: "How does DNS resolution work from a browser request to the response, "
+                  "and what can go wrong?",
+    C.BUSINESS_ANALYSIS: "How would you gather and prioritize requirements for a new "
+                         "software feature from multiple stakeholders?",
+    C.PRODUCT_MANAGEMENT: "How would you decide which features to include in the next release "
+                          "of a product?",
+    C.TECHNICAL_SUPPORT: "How would you troubleshoot a user reporting that an application "
+                         "is running slowly?",
+    C.PROFESSIONAL_SKILLS: "How do you approach communicating complex or difficult information "
+                           "to non-technical stakeholders?",
 }
 PROJECT_QUESTIONS = ("Explain the architecture of {project}.",
                      "What would you improve in {project}?")
